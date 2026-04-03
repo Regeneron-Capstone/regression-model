@@ -1,14 +1,15 @@
 # Duration Regression Model
 
-`sklearn.ensemble.HistGradientBoostingRegressor` predicting trial duration (days) for **COMPLETED** trials only. Preprocessing (encoding, scaling) is unchanged from the prior Ridge pipeline; the booster captures non-linear effects and interactions in the feature space.
+`sklearn.ensemble.HistGradientBoostingRegressor` predicting trial duration (days) for **COMPLETED** trials only — **one model per phase label** (PHASE1, PHASE1/PHASE2, PHASE2, PHASE2/PHASE3, PHASE3), no global scaling; the booster uses non-linear splits and native **NaN** handling in numeric features.
 
 ## Target
 - `duration_days` — time from start to primary completion
+- Preprocessing keeps only trials with **14 ≤ duration_days ≤ 3650** (drop sub-two-week and over-10-year windows as outliers)
 
 ## Features (ablation-tested, best-performing subset)
 
 ### Core features (always included)
-- `phase` — trial phase (one-hot)
+- `phase` — defines which dedicated model is trained (not one-hot encoded inside each single-phase model)
 - `enrollment` — planned enrollment
 - `n_sponsors` — number of sponsors
 - `number_of_arms` — number of arms
@@ -35,10 +36,13 @@
 - `has_survival_endpoint`, `has_safety_endpoint` — flags from measure/description
 - `endpoint_complexity_score` — composite of outcome count and endpoint types
 
-## Metrics (test set)
-- RMSE ≈ 551 days
-- MAE ≈ 360 days
-- R² ≈ 0.3743
+## Training
+- Five independent `HistGradientBoostingRegressor` models, one per label: **PHASE1**, **PHASE1/PHASE2**, **PHASE2**, **PHASE2/PHASE3**, **PHASE3**.
+- **No** `StandardScaler`; numeric features keep **NaN** where missing so HGBR can use missingness in splits.
+- Phase is **not** one-hot encoded inside each model (constant within cohort).
+
+## Metrics
+- See `results/regression_report.txt` after `python 4_regression/train_regression.py` — train / val / **test** RMSE, MAE, R² **per phase**, plus a summary of test R² by phase.
 
 ## Train/val/test split
-60% / 20% / 20%, random_state=42
+Per phase: 60% / 20% / 20%, `random_state=42`

@@ -4,6 +4,10 @@ and run regression to predict duration_days.
 
 Target is log1p-transformed inside TransformedTargetRegressor; predictions are
 inverted to days for evaluation. Restricted to COMPLETED trials only.
+
+Trains one HistGradientBoostingRegressor per phase label: PHASE1, PHASE1/PHASE2,
+PHASE2, PHASE2/PHASE3, PHASE3. No StandardScaler; numeric NaNs are kept for HGBR.
+No phase one-hot inside each cohort (phase is constant per model).
 """
 import re
 import logging
@@ -16,7 +20,7 @@ from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -111,6 +115,15 @@ KEPT_DESIGN_OUTCOMES = [
 ]
 
 RAW_DATA = PROJECT_ROOT / "raw_data"
+
+# One model per phase label (including combined-phase cohorts)
+PHASES_WITH_DEDICATED_MODELS = (
+    "PHASE1",
+    "PHASE1/PHASE2",
+    "PHASE2",
+    "PHASE2/PHASE3",
+    "PHASE3",
+)
 
 
 def _parse_time_frame_days(tf: str) -> float | None:
@@ -373,35 +386,42 @@ def prepare_features(
     design_columns: list[str] | None = None,
     arm_intervention_columns: list[str] | None = None,
     design_outcomes_columns: list[str] | None = None,
+    *,
+    encode_phase: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """
-    Prepare X and y. Handle missing values and encode categoricals.
-    If eligibility_columns is provided, include those eligibility features.
-    eligibility_criteria_text_columns: numeric columns from preprocess (criteria length, tilde counts, burden flag).
-    Returns X, y, phase labels (same length as y, for stratified-style metrics), and encoder/scaler artifacts.
+    Build X (float matrix with NaN allowed for HGBR), y, phase labels, and encoders.
+    When encode_phase is False (per-phase models), phase one-hot is omitted — phase is constant.
+    No median imputation for enrollment / number_of_arms / start_year; no scaling.
     """
     df = df.copy()
 
-    # Extract start_year from start_date
-    df["start_year"] = pd.to_datetime(df["start_date"], errors="coerce").dt.year
+    # start_year as float; NaN if start_date missing
+    if "start_date" in df.columns:
+        df["start_year"] = pd.to_datetime(df["start_date"], errors="coerce").dt.year
+    else:
+        df["start_year"] = np.nan
+    df["start_year"] = pd.to_numeric(df["start_year"], errors="coerce")
 
-    # Numeric: enrollment, number_of_arms (4.7% null), start_year
-    for col in ["enrollment", "number_of_arms", "start_year"]:
+    # Core numerics: keep NaN (missingness is a signal for trees)
+    for col in ["enrollment", "number_of_arms"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-            median_val = df[col].median()
-            fill_val = median_val if pd.notna(median_val) else (2015 if col == "start_year" else 0)
-            df[col] = df[col].fillna(fill_val)
         else:
-            df[col] = 0
+            df[col] = np.nan
 
     # Drop rows with missing target
     df = df.dropna(subset=[TARGET_COLUMN])
-    y = df[TARGET_COLUMN].values
+    y = df[TARGET_COLUMN].values.astype(np.float64)
 
-    # Encode phase (one-hot; ablation: one-hot > phase flags > no phase)
-    phase_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    phase_encoded = phase_encoder.fit_transform(df[["phase"]])
+    # Optional phase one-hot (unused for dedicated single-phase models)
+    if encode_phase:
+        phase_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        phase_encoded = phase_encoder.fit_transform(df[["phase"]])
+        phase_blocks: list[np.ndarray] = [phase_encoded]
+    else:
+        phase_encoder = None
+        phase_blocks = []
 
     # Encode category (one-hot)
     cat_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
@@ -444,19 +464,19 @@ def prepare_features(
                 elig_encoders["gender"] = enc
                 elig_feature_names.extend(enc.get_feature_names_out(["gender_fill"]))
             elif col in ("minimum_age", "maximum_age"):
-                # Parse "18 Years", "65 Years" etc. to numeric
                 raw = df[col].astype(str).str.extract(r"(\d+)", expand=False)
                 vals = pd.to_numeric(raw, errors="coerce")
-                median_val = vals.median()
-                if pd.isna(median_val):
-                    median_val = 18.0 if col == "minimum_age" else 65.0
-                elig_parts.append(np.column_stack([vals.fillna(median_val).values]))
+                elig_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 elig_feature_names.append(col)
             elif col in ("adult", "child", "older_adult"):
-                vals = df[col].fillna(False)
-                if vals.dtype == bool or vals.dtype == "object":
-                    vals = vals.map(lambda x: 1 if x in (True, "true", "True", "YES", "Yes", 1) else 0)
-                elig_parts.append(np.column_stack([vals.values.astype(float)]))
+                s = df[col]
+
+                def _tri_state(v: object) -> float:
+                    if pd.isna(v):
+                        return np.nan
+                    return 1.0 if v in (True, "true", "True", "YES", "Yes", 1) else 0.0
+
+                elig_parts.append(np.column_stack([s.map(_tri_state).astype(np.float64).values]))
                 elig_feature_names.append(col)
 
     # Eligibility criteria text (numeric; from clean_data/studies via preprocess)
@@ -479,20 +499,26 @@ def prepare_features(
             if col not in df.columns:
                 continue
             if col == "has_single_facility":
-                vals = df[col].apply(lambda x: 1 if x in (True, "true", "True", "YES", "Yes", 1) else 0)
-                site_parts.append(np.column_stack([vals.values.astype(float)]))
+
+                def _sf(x: object) -> float:
+                    if pd.isna(x):
+                        return np.nan
+                    return 1.0 if x in (True, "true", "True", "YES", "Yes", 1) else 0.0
+
+                vals = df[col].map(_sf).astype(np.float64)
+                site_parts.append(np.column_stack([vals.values]))
                 site_feature_names.append(col)
             elif col in ("number_of_facilities", "number_of_countries", "number_of_us_states"):
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                site_parts.append(np.column_stack([vals.values]))
+                vals = pd.to_numeric(df[col], errors="coerce")
+                site_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 site_feature_names.append(col)
             elif col == "us_only":
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                site_parts.append(np.column_stack([vals.values]))
+                vals = pd.to_numeric(df[col], errors="coerce")
+                site_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 site_feature_names.append(col)
             elif col == "facility_density":
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                site_parts.append(np.column_stack([vals.values]))
+                vals = pd.to_numeric(df[col], errors="coerce")
+                site_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 site_feature_names.append(col)
 
     # Design features
@@ -503,8 +529,8 @@ def prepare_features(
             if col not in df.columns:
                 continue
             if col == "randomized":
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                design_parts.append(np.column_stack([vals.values]))
+                vals = pd.to_numeric(df[col], errors="coerce")
+                design_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 design_feature_names.append(col)
             elif col == "intervention_model":
                 df["intervention_model_fill"] = df["intervention_model"].fillna("UNKNOWN").astype(str)
@@ -525,8 +551,8 @@ def prepare_features(
                 design_parts.append(enc.fit_transform(df[["primary_purpose_trimmed"]]))
                 design_feature_names.extend(enc.get_feature_names_out(["primary_purpose_trimmed"]))
             elif col in ("masking_depth_score", "design_complexity_composite"):
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                design_parts.append(np.column_stack([vals.values]))
+                vals = pd.to_numeric(df[col], errors="coerce")
+                design_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 design_feature_names.append(col)
 
     # Design outcomes features
@@ -537,14 +563,18 @@ def prepare_features(
             if col not in df.columns:
                 continue
             if col in ("has_survival_endpoint", "has_safety_endpoint"):
-                vals = df[col].fillna(0)
-                if vals.dtype == bool or vals.dtype == "object":
-                    vals = vals.apply(lambda x: 1 if x in (True, "true", "True", 1) else 0)
-                do_parts.append(np.column_stack([vals.values.astype(float)]))
+
+                def _ep(x: object) -> float:
+                    if pd.isna(x):
+                        return np.nan
+                    return 1.0 if x in (True, "true", "True", 1) else 0.0
+
+                vals = df[col].map(_ep).astype(np.float64)
+                do_parts.append(np.column_stack([vals.values]))
                 do_feature_names.append(col)
             else:
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                do_parts.append(np.column_stack([vals.values]))
+                vals = pd.to_numeric(df[col], errors="coerce")
+                do_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
                 do_feature_names.append(col)
 
     # Arm/intervention features
@@ -554,19 +584,20 @@ def prepare_features(
         for col in arm_intervention_columns:
             if col not in df.columns:
                 continue
-            vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
-            arm_parts.append(np.column_stack([vals.values]))
+            vals = pd.to_numeric(df[col], errors="coerce")
+            arm_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
             arm_feature_names.append(col)
 
-    # Numeric features
-    X_numeric = np.column_stack([
-        df["enrollment"].values,
-        df["n_sponsors"].values,
-        df["number_of_arms"].values,
-        df["start_year"].values,
-    ])
+    # Numeric features (n_sponsors: count, 0 = none after merge — keep as-is)
+    enroll = pd.to_numeric(df["enrollment"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
+    n_spon = pd.to_numeric(df["n_sponsors"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
+    n_arms = pd.to_numeric(df["number_of_arms"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
+    sy = pd.to_numeric(df["start_year"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
+    X_numeric = np.column_stack([enroll, n_spon, n_arms, sy])
+
     X = np.hstack(
-        [phase_encoded, cat_encoded]
+        phase_blocks
+        + [cat_encoded]
         + mesh_parts
         + int_parts
         + elig_parts
@@ -577,12 +608,8 @@ def prepare_features(
         + arm_parts
         + [X_numeric]
     )
+    X = np.asarray(X, dtype=np.float64)
 
-    # Scale features
-    scaler = StandardScaler()
-    X = scaler.fit_transform(X)
-
-    # Align with X/y rows after dropna — used for per-phase metrics on held-out data
     phases = df["phase"].astype(str).values
 
     artifacts = {
@@ -597,9 +624,18 @@ def prepare_features(
         "design_feature_names": design_feature_names,
         "do_feature_names": do_feature_names,
         "arm_feature_names": arm_feature_names,
-        "scaler": scaler,
     }
     return X, y, phases, artifacts
+
+
+def _eval_split(name: str, model: TransformedTargetRegressor, X: np.ndarray, y: np.ndarray) -> dict:
+    y_pred = model.predict(X)
+    return {
+        "set": name,
+        "rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
+        "mae": float(mean_absolute_error(y, y_pred)),
+        "r2": float(r2_score(y, y_pred)),
+    }
 
 
 def main() -> None:
@@ -610,77 +646,103 @@ def main() -> None:
         arm_intervention_columns=KEPT_ARM_INTERVENTION,
         design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
     )
-    X, y, phases, artifacts = prepare_features(
-        df,
+
+    completed = df[df["overall_status"] == "COMPLETED"]
+    phase_counts = completed["phase"].astype(str).value_counts()
+    lines: list[str] = []
+    lines.append(
+        "Per-phase HistGradientBoostingRegressor models: PHASE1, PHASE1/PHASE2, "
+        "PHASE2, PHASE2/PHASE3, PHASE3."
+    )
+    lines.append("No StandardScaler; numeric NaNs preserved for HGBR. No phase one-hot inside each model.")
+    lines.append("")
+    lines.append("Trial counts in loaded cohort (COMPLETED, by phase label):")
+    for ph in PHASES_WITH_DEDICATED_MODELS:
+        n = int(phase_counts.get(ph, 0))
+        lines.append(f"  {ph}: n={n:,}")
+    lines.append("")
+
+    prep_kw = dict(
         eligibility_columns=KEPT_ELIGIBILITY,
         eligibility_criteria_text_columns=KEPT_ELIGIBILITY_CRITERIA_TEXT,
         site_footprint_columns=KEPT_SITE_FOOTPRINT,
         design_columns=KEPT_DESIGN,
         arm_intervention_columns=KEPT_ARM_INTERVENTION,
         design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
+        encode_phase=False,
     )
 
-    # Train 60% / Val 20% / Test 20% — split phases with X,y so masks stay aligned
-    X_train, X_temp, y_train, y_temp, _, phases_temp = train_test_split(
-        X, y, phases, test_size=0.4, random_state=42
-    )
-    X_val, X_test, y_val, y_test, _, phases_test = train_test_split(
-        X_temp, y_temp, phases_temp, test_size=0.5, random_state=42
-    )
+    test_r2_by_phase: list[tuple[str, float | None, int]] = []
 
-    # Train on log1p(duration); predict() returns days via expm1 for metrics in original scale
-    model = TransformedTargetRegressor(
-        regressor=HistGradientBoostingRegressor(max_iter=200, random_state=42),
-        func=np.log1p,
-        inverse_func=np.expm1,
-    )
-    model.fit(X_train, y_train)
+    for phase in PHASES_WITH_DEDICATED_MODELS:
+        df_p = df[df["phase"].astype(str) == phase].copy()
+        n_phase = len(df_p)
+        lines.append("=" * 50)
+        lines.append(f"MODEL {phase}  (n={n_phase:,} rows before dropna on target)")
+        lines.append("=" * 50)
 
-    # Evaluate on train, val, test
-    def eval_set(name: str, X: np.ndarray, y: np.ndarray) -> dict:
-        y_pred = model.predict(X)
-        return {
-            "set": name,
-            "rmse": np.sqrt(mean_squared_error(y, y_pred)),
-            "mae": mean_absolute_error(y, y_pred),
-            "r2": r2_score(y, y_pred),
-        }
+        if n_phase < 30:
+            lines.append("  Skipped: not enough rows for a stable train/val/test split.")
+            test_r2_by_phase.append((phase, None, n_phase))
+            lines.append("")
+            continue
 
-    results = [
-        eval_set("train", X_train, y_train),
-        eval_set("val", X_val, y_val),
-        eval_set("test", X_test, y_test),
-    ]
+        X, y, _, _ = prepare_features(df_p, **prep_kw)
+        n_xy = len(y)
+        lines.append(f"  After target present: n={n_xy:,}")
 
-    # Per-phase R² on test: same predictions as global model, subset by trial phase
-    y_pred_test = model.predict(X_test)
-    per_phase_r2: list[tuple[str, str]] = []
-    for ph in sorted(np.unique(phases_test)):
-        mask = phases_test == ph
-        n = int(mask.sum())
-        if n < 2:
-            per_phase_r2.append((ph, f"n={n}  R²=n/a (need ≥2 trials)"))
+        if n_xy < 30:
+            lines.append("  Skipped: too few rows with duration_days after preprocessing.")
+            test_r2_by_phase.append((phase, None, n_xy))
+            lines.append("")
+            continue
+
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            X, y, test_size=0.4, random_state=42
+        )
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.5, random_state=42
+        )
+
+        lines.append(
+            f"  Split: train={len(y_train):,}  val={len(y_val):,}  test={len(y_test):,}"
+        )
+
+        model = TransformedTargetRegressor(
+            regressor=HistGradientBoostingRegressor(max_iter=200, random_state=42),
+            func=np.log1p,
+            inverse_func=np.expm1,
+        )
+        model.fit(X_train, y_train)
+
+        for split_name, X_s, y_s in (
+            ("train", X_train, y_train),
+            ("val", X_val, y_val),
+            ("test", X_test, y_test),
+        ):
+            m = _eval_split(split_name, model, X_s, y_s)
+            lines.append(
+                f"  {m['set']:5}: RMSE={m['rmse']:,.0f} days  MAE={m['mae']:,.0f} days  R²={m['r2']:.4f}"
+            )
+
+        test_r2 = _eval_split("test", model, X_test, y_test)["r2"]
+        test_r2_by_phase.append((phase, test_r2, len(y_test)))
+        lines.append("")
+
+    lines.append("=" * 50)
+    lines.append("SUMMARY — TEST SET R² (dedicated model per phase)")
+    lines.append("=" * 50)
+    for ph, r2, n_test in test_r2_by_phase:
+        if r2 is None:
+            lines.append(f"  {ph}: R²=n/a  (n_test or cohort too small)")
         else:
-            r2_p = r2_score(y_test[mask], y_pred_test[mask])
-            per_phase_r2.append((ph, f"n={n}  R²={r2_p:.4f}"))
-
-    # Report: metrics only
-    lines = []
-    lines.append("-" * 40)
-    lines.append("METRICS")
-    lines.append("-" * 40)
-    for r in results:
-        lines.append(f"  {r['set']:5}: RMSE={r['rmse']:,.0f} days  MAE={r['mae']:,.0f} days  R²={r['r2']:.4f}")
-    lines.append("-" * 40)
-    lines.append("TEST SET R² BY PHASE (from model.predict on X_test)")
-    lines.append("-" * 40)
-    for ph, line in per_phase_r2:
-        lines.append(f"  {ph}: {line}")
-    lines.append("-" * 40)
+            lines.append(f"  {ph}: R²={r2:.4f}  (test n={n_test:,})")
+    lines.append("=" * 50)
 
     report = "\n".join(lines)
     print(report)
     (RESULTS_DIR / "regression_report.txt").write_text(report)
+    logger.info("Wrote %s", RESULTS_DIR / "regression_report.txt")
 
 
 if __name__ == "__main__":

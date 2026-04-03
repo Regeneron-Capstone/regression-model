@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 # Filtering criteria
 ALLOWED_PHASES = {"PHASE1", "PHASE2", "PHASE3", "PHASE1/PHASE2", "PHASE2/PHASE3"}
+# duration_days = primary_completion_date − start_date (days)
+MIN_DURATION_DAYS = 14  # drop bottom outliers / implausibly short windows
+MAX_DURATION_DAYS = 3650  # 10 years — cap top outliers
 
 
 def load_raw_data() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -239,6 +242,19 @@ def main() -> None:
     dropped = before_drop - len(filtered_studies)
     if dropped > 0:
         logger.info("After dropping negative duration: %s rows (removed %s)", f"{len(filtered_studies):,}", dropped)
+
+    before_band = len(filtered_studies)
+    dur = filtered_studies["duration_days"]
+    mask_duration_band = (dur >= MIN_DURATION_DAYS) & (dur <= MAX_DURATION_DAYS)
+    filtered_studies = filtered_studies[mask_duration_band].copy()
+    dropped_band = before_band - len(filtered_studies)
+    logger.info(
+        "After duration band [%s, %s] days: %s rows (removed %s)",
+        MIN_DURATION_DAYS,
+        MAX_DURATION_DAYS,
+        f"{len(filtered_studies):,}",
+        f"{dropped_band:,}",
+    )
 
     # Add modeling columns
     filtered_studies["is_completed"] = filtered_studies["overall_status"] == "COMPLETED"
