@@ -1,6 +1,9 @@
 """
-Run full pipeline: 1. Download → 2. Data exploration → 3. Preprocessing → 4. Regression.
-Outputs final results to results/run_YYYY-MM-DD_HH-MM-SS_results.txt
+Run full pipeline: 1. Download → 2. Data exploration → 3. Preprocessing → 4. Modeling.
+
+- **Default (step 4):** single baseline primary regression → ``results/regression_report.txt``
+- **``--planning-experiment``:** full staged planning-time run (primary + post-primary strict + combined
+  forecast + late-risk + deviation) → ``results/experiments/<UTC>/``
 
 Checkpointing: download scripts skip if data is up to date (see raw_data/.checkpoints/).
 Use --skip-download to skip downloads when you already have raw_data.
@@ -34,7 +37,7 @@ DOWNLOAD_SCRIPTS = [
 def run_script(script_path: Path, step_name: str, quiet: bool = False) -> bool:
     """Run a Python script, return True if successful."""
     print(f"\n{step_name}")
-    kwargs = {}
+    kwargs: dict = {}
     if quiet:
         kwargs["stdout"] = subprocess.DEVNULL
         kwargs["stderr"] = subprocess.DEVNULL
@@ -47,13 +50,35 @@ def run_script(script_path: Path, step_name: str, quiet: bool = False) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run full pipeline")
+    parser = argparse.ArgumentParser(
+        description="Run full pipeline: download → explore → preprocess → regression or planning experiment"
+    )
     parser.add_argument(
         "--skip-download",
         action="store_true",
         help="Skip download steps (use when raw_data already exists)",
     )
+    parser.add_argument(
+        "--planning-experiment",
+        action="store_true",
+        help="After preprocess, run full planning-time experiment (replaces single train_regression step)",
+    )
+    parser.add_argument(
+        "--experiment-dry-run",
+        action="store_true",
+        help="With --planning-experiment, print subprocess commands only (no training)",
+    )
+    parser.add_argument(
+        "--late-quantile",
+        type=float,
+        default=0.75,
+        help="With --planning-experiment: late-risk label quantile (default: 0.75)",
+    )
     args = parser.parse_args()
+
+    if args.planning_experiment and not (0.0 < args.late_quantile < 1.0):
+        print("ERROR: --late-quantile must be in (0, 1)")
+        sys.exit(1)
 
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     results_path = RESULTS_DIR / f"run_{run_timestamp}_results.txt"
@@ -61,7 +86,6 @@ def main() -> None:
     if args.skip_download:
         print("Skipping download steps (--skip-download)")
 
-    # Step 1: Download (quiet — checkpointing handles skips)
     if not args.skip_download:
         print("\n1. Download")
         for script_path in DOWNLOAD_SCRIPTS:
@@ -75,22 +99,50 @@ def main() -> None:
                 print("ERROR: 1. Download failed")
                 sys.exit(1)
 
-    # Steps 2–4 (quiet for 2 and 3; regression prints metrics)
-    steps = [
+    explore_preprocess = [
         (PROJECT_ROOT / "2_data_exploration" / "run_all.py", "2. Data exploration", True),
         (PROJECT_ROOT / "3_preprocessing" / "preprocess.py", "3. Preprocessing", True),
-        (PROJECT_ROOT / "4_regression" / "train_regression.py", "4. Regression", False),
     ]
 
-    for script_path, step_name, quiet in steps:
+    for script_path, step_name, quiet in explore_preprocess:
         if not run_script(script_path, step_name, quiet=quiet):
             print(f"ERROR: {step_name} failed")
             sys.exit(1)
 
-    # Collect final results (metrics only)
+    if args.planning_experiment:
+        sys.path.insert(0, str(PROJECT_ROOT / "4_regression"))
+        from planning_experiment_runner import run_experiment
+
+        print("\n4. Planning-time experiment (staged models)")
+        exp_dir = run_experiment(dry_run=args.experiment_dry_run, late_quantile=args.late_quantile)
+        if exp_dir is not None:
+            results_path.write_text(
+                "Planning-time experiment completed.\n\n"
+                f"Experiment directory:\n  {exp_dir}\n\n"
+                f"See experiment_summary.txt and experiment.log in that folder.\n",
+                encoding="utf-8",
+            )
+        else:
+            results_path.write_text(
+                "Planning-time experiment — dry run only (no artifacts).\n"
+                "Re-run without --experiment-dry-run to execute training.\n",
+                encoding="utf-8",
+            )
+        print(f"\nRun summary pointer: {results_path}")
+        return
+
+    print("\n4. Regression (baseline primary_completion)")
+    if not run_script(
+        PROJECT_ROOT / "4_regression" / "train_regression.py",
+        "4. Regression",
+        quiet=False,
+    ):
+        print("ERROR: 4. Regression failed")
+        sys.exit(1)
+
     regression_report = RESULTS_DIR / "regression_report.txt"
     if regression_report.exists():
-        results_path.write_text(regression_report.read_text())
+        results_path.write_text(regression_report.read_text(encoding="utf-8"), encoding="utf-8")
     print(f"\nFinal results saved to: {results_path}")
 
 

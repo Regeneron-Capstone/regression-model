@@ -1,48 +1,59 @@
-# Duration Regression Model
+# Duration and planning-time models
 
-`sklearn.ensemble.HistGradientBoostingRegressor` predicting trial duration (days) for **COMPLETED** trials only — **one model per phase label** (PHASE1, PHASE1/PHASE2, PHASE2, PHASE2/PHASE3, PHASE3), no global scaling; the booster uses non-linear splits and native **NaN** handling in numeric features.
+## Completed trials only
 
-## Target
-- `duration_days` — time from start to primary completion
-- Preprocessing keeps only trials with **14 ≤ duration_days ≤ 3650** (drop sub-two-week and over-10-year windows as outliers)
+All duration modeling uses **COMPLETED** studies (actual start and completion dates available). Preprocessing filters extreme primary spans when building `duration_days` (see `3_preprocessing/preprocess.py` — e.g. **14 ≤ duration_days ≤ 3650**).
 
-## Features (ablation-tested, best-performing subset)
+## Regression: model family and target transform
 
-### Core features (always included)
-- `phase` — defines which dedicated model is trained (not one-hot encoded inside each single-phase model)
-- `enrollment` — planned enrollment
-- `n_sponsors` — number of sponsors
-- `number_of_arms` — number of arms
-- `start_year` — trial start year
-- `category` — therapeutic category (one-hot, 132 levels)
-- `downcase_mesh_term` — MeSH condition terms (one-hot)
-- `intervention_type` — intervention types (one-hot)
+- **Regressor:** `sklearn.ensemble.HistGradientBoostingRegressor` (`max_iter=200`, fixed `random_state` where applicable).
+- **Target:** `sklearn.compose.TransformedTargetRegressor` with **`np.log1p`** / **`np.expm1`** so the booster fits on log scale; metrics in reports are in **days**.
+- **Features:** no global `StandardScaler`; numeric missing values stay **NaN** for HGBR.
 
-### Eligibility (kept from ablation)
-- `gender`, `minimum_age`, `maximum_age`, `adult`, `child`, `older_adult`
+## Targets (`4_regression/targets.py`)
 
-### Site footprint (kept from ablation)
-- `number_of_facilities`, `number_of_countries`, `us_only`, `has_single_facility`
+| `target_kind` | Definition (days) |
+|---------------|-------------------|
+| `primary_completion` (default) | primary completion − start (`duration_days` when present) |
+| `post_primary_completion` | study completion − primary completion |
+| `total_completion` | study completion − start |
 
-### Design (kept from ablation)
-- `randomized`, `intervention_model`, `masking_depth_score`, `primary_purpose`, `design_complexity_composite`
+Training and reports select the target via CLI `--target` and attach the corresponding column in `prepare_features` / `assemble_feature_matrix`.
 
-### Arm/intervention (kept from ablation)
-- `number_of_interventions`, `intervention_type_diversity`, `mono_therapy`, `has_placebo`, `has_active_comparator`, `n_mesh_intervention_terms`
+## Feature policies
 
-### Design outcomes (from design_outcomes table)
-- `max_planned_followup_days` — max planned follow-up parsed from time_frame
-- `n_primary_outcomes`, `n_secondary_outcomes`, `n_outcomes`
-- `has_survival_endpoint`, `has_safety_endpoint` — flags from measure/description
-- `endpoint_complexity_score` — composite of outcome count and endpoint types
+- **`baseline`** — full feature groups used in historical primary-duration training (includes `start_year`, site-footprint fields such as facility counts, etc.). Default for primary and total-completion experiments unless overridden.
+- **`strict_planning`** — drops columns listed in `4_regression/feature_registry.py` (planning-safe protocol/design/eligibility signal; **no** `start_year`, **no** operational site-footprint fields). Used for post-primary duration training and late-risk classification.
 
-## Training
-- Five independent `HistGradientBoostingRegressor` models, one per label: **PHASE1**, **PHASE1/PHASE2**, **PHASE2**, **PHASE2/PHASE3**, **PHASE3**.
-- **No** `StandardScaler`; numeric features keep **NaN** where missing so HGBR can use missingness in splits.
-- Phase is **not** one-hot encoded inside each model (constant within cohort).
+Column lists for joins are centralized in **`4_regression/cohort_columns.py`**; loading joined tables is **`4_regression/cohort_io.load_and_join`**.
+
+## Regression architecture (`4_regression/train_regression.py`)
+
+Not one global model over all rows. For each target + feature policy:
+
+- **Dedicated** models fit **PHASE1**, **PHASE2**, **PHASE3** separately (constant phase within cohort; phase is **not** one-hot encoded inside those cohorts).
+- **Early joint** trains on **PHASE1 ∪ PHASE1/PHASE2 ∪ PHASE2**; used to evaluate **PHASE1/PHASE2** rows in the joint test fold.
+- **Late joint** trains on **PHASE2 ∪ PHASE2/PHASE3 ∪ PHASE3**; used for **PHASE2/PHASE3** mixed labels in the joint test fold.
+
+Reports include mixed-cohort baselines and summary tables; see `results/regression_report.txt` (or target-specific report names).
+
+## Train / val / test
+
+**60% / 20% / 20%** splits, `random_state=42` (unless overridden), consistent with deviation analysis and metadata capture.
+
+## Staged full-duration forecast
+
+**`4_regression/combined_duration_forecast.py`** loads (or refits) two stacks of stage models — **primary** with **baseline** features and **post-primary** with **strict_planning** features — then sums components to a **total predicted completion span** and writes a CSV (see script docstring). Persisted bundles live under `results/stage_models/` by default or under an experiment directory when using **`main.py --planning-experiment`** or **`4_regression/planning_experiment_runner.py`**.
+
+## Late-risk classification
+
+**`4_regression/late_risk_classifier.py`** trains **`HistGradientBoostingClassifier`** (`class_weight='balanced'`) on **strict_planning** features with label derived from **total completion** duration vs per-phase training quantiles (see report header). Outputs classification metrics (precision, recall, F1, ROC-AUC, PR-AUC) on val/test.
+
+## Deviation and comparison
+
+- **Deviation:** `5_deviation/deviation_analysis.py` — percent deviation of actual vs predicted for configurable targets; **`--target combined`** consumes the combined forecast CSV.
+- **Baseline vs staged summary:** `4_regression/build_final_comparison_report.py` aggregates regression reports, optional **`baseline_metadata.json`**, optional **frozen** primary regression report, and the late-risk report into **`final_comparison_metrics.csv`** and a Markdown (optional TXT) narrative.
 
 ## Metrics
-- See `results/regression_report.txt` after `python 4_regression/train_regression.py` — train / val / **test** RMSE, MAE, R² **per phase**, plus a summary of test R² by phase.
 
-## Train/val/test split
-Per phase: 60% / 20% / 20%, `random_state=42`
+Regression: **RMSE**, **MAE**, **R²** on train / val / test as printed in each report. Classification: see late-risk report. For a single-command refresh of the default primary baseline report, run `python 4_regression/train_regression.py` and open **`results/regression_report.txt`**.

@@ -1,6 +1,6 @@
 """
 Join studies with sponsors, select features, train/val/test split,
-and run regression to predict duration_days.
+and run regression to predict a configurable duration target (default: primary_completion / duration_days).
 
 Target is log1p-transformed inside TransformedTargetRegressor; predictions are
 inverted to days for evaluation. Restricted to COMPLETED trials only.
@@ -12,7 +12,7 @@ Trains HistGradientBoostingRegressor models on COMPLETED trials:
 No StandardScaler; numeric NaNs are kept for HGBR. No phase one-hot inside each cohort.
 """
 
-import re
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -21,18 +21,34 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder
+from evaluation import (
+    evaluate_sklearn_split,
+    evaluate_subset,
+    joint_subset_report_line,
+    metrics_report_line,
+    mixed_cohort_test_line,
+)
+from cohort_columns import (
+    EARLY_JOINT_PHASES,
+    KEPT_ARM_INTERVENTION,
+    KEPT_DESIGN,
+    KEPT_DESIGN_OUTCOMES,
+    KEPT_ELIGIBILITY,
+    KEPT_ELIGIBILITY_CRITERIA_TEXT,
+    KEPT_SITE_FOOTPRINT,
+    LATE_JOINT_PHASES,
+    PHASE_REPORT_ORDER,
+    PHASE_SINGLE_MODELS,
+    PHASES_WITH_DEDICATED_MODELS,
+)
+from cohort_io import load_and_join
+from features import assemble_feature_matrix
+
+from targets import DEFAULT_TARGET_KIND, TARGET_DURATION_COLUMN, describe_target_kind
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-_PREPROC = PROJECT_ROOT / "3_preprocessing"
-if str(_PREPROC) not in sys.path:
-    sys.path.insert(0, str(_PREPROC))
-from eligibility_criteria_features import CRITERIA_TEXT_FEATURE_COLUMNS
-
-CLEAN_DATA = PROJECT_ROOT / "clean_data"
 RESULTS_DIR = PROJECT_ROOT / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -83,310 +99,28 @@ ARM_INTERVENTION_FEATURES = [
     "has_active_comparator",
     "n_mesh_intervention_terms",
 ]
-TARGET_COLUMN = "duration_days"
+# Primary-completion span column on clean studies (preprocess); also the default regression target.
+TARGET_COLUMN = TARGET_DURATION_COLUMN
 
-# Best-performing columns from ablation studies (see MODEL.md)
-KEPT_ELIGIBILITY = ["gender", "minimum_age", "maximum_age", "adult", "child", "older_adult"]
-KEPT_ELIGIBILITY_CRITERIA_TEXT = list(CRITERIA_TEXT_FEATURE_COLUMNS)
-KEPT_SITE_FOOTPRINT = ["number_of_facilities", "number_of_countries", "us_only", "has_single_facility"]
-KEPT_DESIGN = ["randomized", "intervention_model", "masking_depth_score", "primary_purpose", "design_complexity_composite"]
-KEPT_ARM_INTERVENTION = [
-    "number_of_interventions",
-    "intervention_type_diversity",
-    "mono_therapy",
-    "has_placebo",
-    "has_active_comparator",
-    "n_mesh_intervention_terms",
-]
-DESIGN_OUTCOMES_FEATURES = [
-    "max_planned_followup_days",
-    "n_primary_outcomes",
-    "n_secondary_outcomes",
-    "n_outcomes",
-    "has_survival_endpoint",
-    "has_safety_endpoint",
-    "endpoint_complexity_score",
-]
-KEPT_DESIGN_OUTCOMES = [
-    "max_planned_followup_days",
-    "n_primary_outcomes",
-    "n_secondary_outcomes",
-    "n_outcomes",
-    "has_survival_endpoint",
-    "has_safety_endpoint",
-    "endpoint_complexity_score",
-]
-
-RAW_DATA = PROJECT_ROOT / "raw_data"
-
-# Single-phase models (enough samples each); mixed labels use joint pools below
-PHASE_SINGLE_MODELS = ("PHASE1", "PHASE2", "PHASE3")
-# Alias for scripts that import this name (e.g. 5_deviation/baseline_deviation.py)
-PHASES_WITH_DEDICATED_MODELS = PHASE_SINGLE_MODELS
-
-EARLY_JOINT_PHASES = frozenset({"PHASE1", "PHASE1/PHASE2", "PHASE2"})
-LATE_JOINT_PHASES = frozenset({"PHASE2", "PHASE2/PHASE3", "PHASE3"})
-
-# Row order for summary table / reporting
-PHASE_REPORT_ORDER = (
-    "PHASE1",
-    "PHASE1/PHASE2",
-    "PHASE2",
-    "PHASE2/PHASE3",
-    "PHASE3",
+TARGET_KIND_CHOICES: tuple[str, ...] = (
+    "primary_completion",
+    "post_primary_completion",
+    "total_completion",
 )
+FEATURE_POLICY_CHOICES: tuple[str, ...] = ("baseline", "strict_planning")
 
 
-def _parse_time_frame_days(tf: str) -> float | None:
-    """Parse time_frame string to days. Returns None if unparseable."""
-    if pd.isna(tf) or not isinstance(tf, str) or not tf.strip():
-        return None
-    tf = tf.strip().lower()
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(day|week|month|year)s?", tf)
-    if not m:
-        return None
-    val = float(m.group(1))
-    unit = m.group(2)
-    if unit == "day":
-        return val
-    if unit == "week":
-        return val * 7
-    if unit == "month":
-        return val * 30.44
-    if unit == "year":
-        return val * 365.25
-    return None
-
-
-def _has_endpoint_keywords(text: str, keywords: list[str]) -> bool:
-    if pd.isna(text) or not isinstance(text, str):
-        return False
-    t = text.lower()
-    return any(k in t for k in keywords)
-
-
-def load_and_join(
-    eligibility_columns: list[str] | None = None,
-    site_footprint_columns: list[str] | None = None,
-    design_columns: list[str] | None = None,
-    arm_intervention_columns: list[str] | None = None,
-    design_outcomes_columns: list[str] | None = None,
-) -> pd.DataFrame:
-    """Load clean studies, sponsors, and categorized_output; join on nct_id.
-    If eligibility_columns is provided, join eligibilities table for those columns.
-    """
-    studies = pd.read_csv(CLEAN_DATA / "studies.csv", low_memory=False)
-    sponsors = pd.read_csv(CLEAN_DATA / "sponsors.csv", low_memory=False)
-
-    # Restrict to COMPLETED trials only (actual duration)
-    studies = studies[studies["overall_status"] == "COMPLETED"].copy()
-
-    # Aggregate sponsors: count per nct_id
-    sponsor_counts = sponsors.groupby("nct_id").size().reset_index(name="n_sponsors")
-    df = studies.merge(sponsor_counts, on="nct_id", how="left")
-    df["n_sponsors"] = df["n_sponsors"].fillna(0).astype(int)
-
-    # Join category from categorized_output (take highest-confidence per trial)
-    categorized = pd.read_csv(RAW_DATA / "categorized_output.csv", low_memory=False)
-    cat_agg = (
-        categorized.sort_values("confidence", ascending=False)
-        .groupby("nct_id")[["category"]]
-        .first()
-        .reset_index()
-    )
-    df = df.merge(cat_agg, on="nct_id", how="left")
-    df["category"] = df["category"].fillna("Other_Unclassified")
-
-    # Join downcase_mesh_term from browse_conditions (first per trial)
-    bc_path = RAW_DATA / "browse_conditions.csv"
-    if bc_path.exists():
-        bc = pd.read_csv(bc_path, low_memory=False)
-        mesh_col = "downcase_mesh_term" if "downcase_mesh_term" in bc.columns else "mesh_term"
-        if mesh_col in bc.columns:
-            mesh_agg = bc.groupby("nct_id")[mesh_col].first().reset_index()
-            mesh_agg.columns = ["nct_id", "downcase_mesh_term"]
-            df = df.merge(mesh_agg, on="nct_id", how="left")
-            df["downcase_mesh_term"] = df["downcase_mesh_term"].fillna("unknown")
-
-    # Join intervention_type from interventions (mode per trial)
-    int_path = RAW_DATA / "interventions.csv"
-    if int_path.exists():
-        interventions = pd.read_csv(int_path, low_memory=False)
-        if "intervention_type" in interventions.columns:
-            int_agg = (
-                interventions.groupby("nct_id")["intervention_type"]
-                .agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else x.iloc[0])
-                .reset_index()
-            )
-            df = df.merge(int_agg, on="nct_id", how="left")
-            df["intervention_type"] = df["intervention_type"].fillna("UNKNOWN")
-
-    # Join eligibilities (first row per nct_id)
-    elig_path = RAW_DATA / "eligibilities.csv"
-    if elig_path.exists() and eligibility_columns:
-        elig = pd.read_csv(elig_path, low_memory=False)
-        cols_to_join = ["nct_id"] + [c for c in eligibility_columns if c in elig.columns]
-        if len(cols_to_join) > 1:
-            elig_agg = elig[cols_to_join].groupby("nct_id").first().reset_index()
-            df = df.merge(elig_agg, on="nct_id", how="left")
-
-    # Join site footprint (calculated_values, facilities, countries)
-    if site_footprint_columns:
-        cv_path = RAW_DATA / "calculated_values.csv"
-        if cv_path.exists():
-            cv = pd.read_csv(cv_path, low_memory=False)
-            cv_cols = ["nct_id", "number_of_facilities", "has_us_facility", "has_single_facility"]
-            cv_cols = [c for c in cv_cols if c in cv.columns]
-            cv_agg = cv[cv_cols].groupby("nct_id").first().reset_index()
-            df = df.merge(cv_agg, on="nct_id", how="left")
-
-        countries_path = RAW_DATA / "countries.csv"
-        if countries_path.exists():
-            countries = pd.read_csv(countries_path, low_memory=False)
-            # Exclude removed countries (removed=True means no longer associated)
-            if "removed" in countries.columns:
-                countries_active = countries[~countries["removed"].fillna(False).astype(bool)]
-            else:
-                countries_active = countries
-            n_countries = countries_active.groupby("nct_id").size().reset_index(name="number_of_countries")
-            df = df.merge(n_countries, on="nct_id", how="left")
-            # US-only: 1 if exactly 1 country and it's US
-            if "name" in countries.columns:
-                us_only = (
-                    countries_active.groupby("nct_id")["name"]
-                    .apply(lambda x: 1 if (len(x) == 1 and "united states" in str(x.iloc[0]).lower()) else 0)
-                    .reset_index(name="us_only")
-                )
-                df = df.merge(us_only, on="nct_id", how="left")
-
-        fac_path = RAW_DATA / "facilities.csv"
-        if fac_path.exists() and "number_of_us_states" in site_footprint_columns:
-            fac = pd.read_csv(fac_path, low_memory=False)
-            us_fac = fac[fac["country"].str.upper().str.contains("UNITED STATES", na=False)]
-            n_us_states = us_fac.groupby("nct_id")["state"].nunique().reset_index(name="number_of_us_states")
-            df = df.merge(n_us_states, on="nct_id", how="left")
-
-        # Derived: facility_density = number_of_facilities / enrollment
-        if "facility_density" in site_footprint_columns and "number_of_facilities" in df.columns and "enrollment" in df.columns:
-            enroll = pd.to_numeric(df["enrollment"], errors="coerce").fillna(1)
-            df["facility_density"] = df["number_of_facilities"].fillna(0) / enroll.replace(0, 1)
-
-    # Join designs (one row per nct_id)
-    if design_columns:
-        designs_path = RAW_DATA / "designs.csv"
-        if designs_path.exists():
-            designs = pd.read_csv(designs_path, low_memory=False)
-            design_cols = ["nct_id", "allocation", "intervention_model", "primary_purpose", "masking",
-                          "subject_masked", "caregiver_masked", "investigator_masked", "outcomes_assessor_masked"]
-            design_cols = [c for c in design_cols if c in designs.columns]
-            design_agg = designs[design_cols].groupby("nct_id").first().reset_index()
-            df = df.merge(design_agg, on="nct_id", how="left")
-
-            # Derived: randomized (1 if RANDOMIZED)
-            if "randomized" in design_columns and "allocation" in df.columns:
-                df["randomized"] = (df["allocation"].str.upper() == "RANDOMIZED").astype(int)
-
-            # Derived: masking_depth_score (NONE=0, SINGLE=1, DOUBLE=2, TRIPLE=3, QUADRUPLE=4)
-            if "masking_depth_score" in design_columns and "masking" in df.columns:
-                mask_map = {"NONE": 0, "SINGLE": 1, "DOUBLE": 2, "TRIPLE": 3, "QUADRUPLE": 4}
-                df["masking_depth_score"] = df["masking"].str.upper().map(mask_map).fillna(0)
-                # Add role flags: +0.25 per masked role (max 1 extra)
-                for role in ["subject_masked", "caregiver_masked", "investigator_masked", "outcomes_assessor_masked"]:
-                    if role in df.columns:
-                        df["masking_depth_score"] += df[role].apply(
-                            lambda x: 0.25 if x in (True, "true", "True", 1) else 0
-                        )
-
-            # Derived: design_complexity_composite (randomized + multi-arm + normalized masking)
-            if "design_complexity_composite" in design_columns:
-                r = (df["allocation"].str.upper() == "RANDOMIZED").astype(int) if "allocation" in df.columns else 0
-                m = df["masking_depth_score"].fillna(0) if "masking_depth_score" in df.columns else 0
-                if "masking_depth_score" not in df.columns and "masking" in df.columns:
-                    mask_map = {"NONE": 0, "SINGLE": 1, "DOUBLE": 2, "TRIPLE": 3, "QUADRUPLE": 4}
-                    m = df["masking"].str.upper().map(mask_map).fillna(0)
-                arms = pd.to_numeric(df["number_of_arms"], errors="coerce").fillna(1)
-                multi = (arms > 1).astype(int)
-                df["design_complexity_composite"] = r + multi + (m / 5)
-
-    # Join arm/intervention complexity (interventions, design_groups, browse_interventions)
-    if arm_intervention_columns:
-        int_path = RAW_DATA / "interventions.csv"
-        if int_path.exists():
-            interventions = pd.read_csv(int_path, low_memory=False)
-            if "intervention_type" in interventions.columns:
-                n_int = interventions.groupby("nct_id").size().reset_index(name="number_of_interventions")
-                df = df.merge(n_int, on="nct_id", how="left")
-                n_types = interventions.groupby("nct_id")["intervention_type"].nunique().reset_index(name="intervention_type_diversity")
-                df = df.merge(n_types, on="nct_id", how="left")
-                df["mono_therapy"] = (df["intervention_type_diversity"].fillna(0) == 1).astype(int)
-
-        dg_path = RAW_DATA / "design_groups.csv"
-        if dg_path.exists():
-            dg = pd.read_csv(dg_path, low_memory=False)
-            if "group_type" in dg.columns:
-                dg["_gt"] = dg["group_type"].fillna("").astype(str).str.upper()
-                dg["_title"] = dg.get("title", pd.Series([""] * len(dg))).fillna("").astype(str).str.upper()
-                dg["_combined"] = dg["_gt"] + " " + dg["_title"]
-                has_placebo = dg.groupby("nct_id")["_combined"].apply(lambda x: 1 if x.str.contains("PLACEBO", na=False).any() else 0).reset_index(name="has_placebo")
-                df = df.merge(has_placebo, on="nct_id", how="left")
-                has_ac = dg.groupby("nct_id")["_combined"].apply(lambda x: 1 if x.str.contains("ACTIVE.COMPARATOR|ACTIVE_COMPARATOR|COMPARATOR", na=False, regex=True).any() else 0).reset_index(name="has_active_comparator")
-                df = df.merge(has_ac, on="nct_id", how="left")
-
-        bi_path = RAW_DATA / "browse_interventions.csv"
-        if bi_path.exists():
-            bi = pd.read_csv(bi_path, low_memory=False)
-            mesh_col = "downcase_mesh_term" if "downcase_mesh_term" in bi.columns else "mesh_term"
-            if mesh_col in bi.columns:
-                n_mesh = bi.groupby("nct_id")[mesh_col].nunique().reset_index(name="n_mesh_intervention_terms")
-                df = df.merge(n_mesh, on="nct_id", how="left")
-
-    # Join design_outcomes (per-trial aggregates)
-    if design_outcomes_columns:
-        do_path = RAW_DATA / "design_outcomes.csv"
-        if do_path.exists():
-            nct_ids = set(df["nct_id"].unique())
-            usecols = ["nct_id", "outcome_type", "measure", "time_frame"]
-            if "description" in pd.read_csv(do_path, nrows=0).columns:
-                usecols.append("description")
-            chunks = []
-            for chunk in pd.read_csv(do_path, chunksize=200_000, low_memory=False, usecols=usecols):
-                chunk = chunk[chunk["nct_id"].isin(nct_ids)]
-                if len(chunk) > 0:
-                    chunks.append(chunk)
-            do = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=usecols + ["_tf_days"])
-            if len(do) == 0:
-                do = None
-            else:
-                do["_tf_days"] = do["time_frame"].apply(_parse_time_frame_days)
-                SURVIVAL_KW = ["survival", "os", "pfs", "dfs", "overall survival", "progression-free survival"]
-                SAFETY_KW = ["safety", "adverse", "ae", "sae", "toxicity", "tolerability"]
-                meas = do["measure"] if "measure" in do.columns else pd.Series([""] * len(do))
-                desc = do["description"] if "description" in do.columns else pd.Series([""] * len(do))
-                do["_has_survival"] = meas.apply(lambda x: _has_endpoint_keywords(x, SURVIVAL_KW)) | desc.apply(lambda x: _has_endpoint_keywords(x, SURVIVAL_KW))
-                do["_has_safety"] = meas.apply(lambda x: _has_endpoint_keywords(x, SAFETY_KW)) | desc.apply(lambda x: _has_endpoint_keywords(x, SAFETY_KW))
-                n_outcomes = do.groupby("nct_id").size().reset_index(name="n_outcomes")
-                max_tf = do.groupby("nct_id")["_tf_days"].max().reset_index(name="max_planned_followup_days")
-                agg = n_outcomes.merge(max_tf, on="nct_id", how="left")
-                if "outcome_type" in do.columns:
-                    n_prim = do.groupby("nct_id")["outcome_type"].apply(lambda x: (x.fillna("").str.upper() == "PRIMARY").sum()).reset_index(name="n_primary_outcomes")
-                    n_sec = do.groupby("nct_id")["outcome_type"].apply(lambda x: (x.fillna("").str.upper() == "SECONDARY").sum()).reset_index(name="n_secondary_outcomes")
-                    agg = agg.merge(n_prim, on="nct_id", how="left").merge(n_sec, on="nct_id", how="left")
-                else:
-                    agg["n_primary_outcomes"] = 0
-                    agg["n_secondary_outcomes"] = 0
-                has_surv = do.groupby("nct_id")["_has_survival"].max().reset_index(name="has_survival_endpoint")
-                has_safe = do.groupby("nct_id")["_has_safety"].max().reset_index(name="has_safety_endpoint")
-                agg = agg.merge(has_surv, on="nct_id", how="left").merge(has_safe, on="nct_id", how="left")
-                agg["endpoint_complexity_score"] = (
-                    agg["n_outcomes"].fillna(0) * 0.5
-                    + agg["n_primary_outcomes"].fillna(0) * 0.3
-                    + agg["n_secondary_outcomes"].fillna(0) * 0.2
-                    + agg["has_survival_endpoint"].fillna(0) * 2
-                    + agg["has_safety_endpoint"].fillna(0) * 1
-                )
-                df = df.merge(agg, on="nct_id", how="left")
-
-    return df
+def resolve_report_path(
+    target_kind: str,
+    feature_policy: str,
+    report_arg: Path | None,
+) -> Path:
+    """Default report path preserves legacy ``regression_report.txt`` for baseline primary target."""
+    if report_arg is not None:
+        return report_arg.expanduser().resolve()
+    if target_kind == DEFAULT_TARGET_KIND and feature_policy == "baseline":
+        return RESULTS_DIR / "regression_report.txt"
+    return RESULTS_DIR / f"regression_report_{target_kind}_{feature_policy}.txt"
 
 
 def prepare_features(
@@ -399,254 +133,26 @@ def prepare_features(
     design_outcomes_columns: list[str] | None = None,
     *,
     encode_phase: bool = False,
+    policy: str = "baseline",
+    target_kind: str = DEFAULT_TARGET_KIND,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """
     Build X (float matrix with NaN allowed for HGBR), y, phase labels, and encoders.
-    When encode_phase is False (per-phase models), phase one-hot is omitted — phase is constant.
-    No median imputation for enrollment / number_of_arms / start_year; no scaling.
+    Delegates to ``features.assemble_feature_matrix``; ``policy="baseline"`` preserves
+    historical training behavior. ``target_kind`` selects y via ``targets.resolve_target_series``.
     """
-    df = df.copy()
-
-    # start_year as float; NaN if start_date missing
-    if "start_date" in df.columns:
-        df["start_year"] = pd.to_datetime(df["start_date"], errors="coerce").dt.year
-    else:
-        df["start_year"] = np.nan
-    df["start_year"] = pd.to_numeric(df["start_year"], errors="coerce")
-
-    # Core numerics: keep NaN (missingness is a signal for trees)
-    for col in ["enrollment", "number_of_arms"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        else:
-            df[col] = np.nan
-
-    # Drop rows with missing target
-    df = df.dropna(subset=[TARGET_COLUMN])
-    y = df[TARGET_COLUMN].values.astype(np.float64)
-
-    # Optional phase one-hot (unused for dedicated single-phase models)
-    if encode_phase:
-        phase_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        phase_encoded = phase_encoder.fit_transform(df[["phase"]])
-        phase_blocks: list[np.ndarray] = [phase_encoded]
-    else:
-        phase_encoder = None
-        phase_blocks = []
-
-    # Encode category (one-hot)
-    cat_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    cat_encoded = cat_encoder.fit_transform(df[["category"]])
-
-    # Encode downcase_mesh_term (one-hot, top 50 to limit features)
-    mesh_parts = []
-    mesh_encoder = None
-    if "downcase_mesh_term" in df.columns:
-        top_mesh = df["downcase_mesh_term"].value_counts().head(50).index.tolist()
-        df["mesh_trimmed"] = df["downcase_mesh_term"].where(
-            df["downcase_mesh_term"].isin(top_mesh), "other"
-        )
-        mesh_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        mesh_parts = [mesh_encoder.fit_transform(df[["mesh_trimmed"]])]
-
-    # Encode intervention_type (one-hot, top 15 by count — same pattern as mesh_term)
-    int_parts = []
-    int_encoder = None
-    if "intervention_type" in df.columns:
-        top_int = df["intervention_type"].value_counts().head(15).index.tolist()
-        df["intervention_trimmed"] = df["intervention_type"].where(
-            df["intervention_type"].isin(top_int), "other"
-        )
-        int_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        int_parts = [int_encoder.fit_transform(df[["intervention_trimmed"]])]
-
-    # Eligibility features
-    elig_parts = []
-    elig_encoders = {}
-    elig_feature_names = []
-    if eligibility_columns:
-        for col in eligibility_columns:
-            if col not in df.columns:
-                continue
-            if col == "gender":
-                df["gender_fill"] = df["gender"].fillna("ALL").astype(str)
-                enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-                elig_parts.append(enc.fit_transform(df[["gender_fill"]]))
-                elig_encoders["gender"] = enc
-                elig_feature_names.extend(enc.get_feature_names_out(["gender_fill"]))
-            elif col in ("minimum_age", "maximum_age"):
-                raw = df[col].astype(str).str.extract(r"(\d+)", expand=False)
-                vals = pd.to_numeric(raw, errors="coerce")
-                elig_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                elig_feature_names.append(col)
-            elif col in ("adult", "child", "older_adult"):
-                s = df[col]
-
-                def _tri_state(v: object) -> float:
-                    if pd.isna(v):
-                        return np.nan
-                    return 1.0 if v in (True, "true", "True", "YES", "Yes", 1) else 0.0
-
-                elig_parts.append(np.column_stack([s.map(_tri_state).astype(np.float64).values]))
-                elig_feature_names.append(col)
-
-    # Eligibility criteria text (numeric; from clean_data/studies via preprocess)
-    criteria_parts: list[np.ndarray] = []
-    criteria_text_feature_names: list[str] = []
-    if eligibility_criteria_text_columns:
-        for col in eligibility_criteria_text_columns:
-            if col not in df.columns:
-                vals = np.zeros(len(df), dtype=float)
-            else:
-                vals = pd.to_numeric(df[col], errors="coerce").fillna(0).to_numpy(dtype=float)
-            criteria_parts.append(np.column_stack([vals]))
-            criteria_text_feature_names.append(col)
-
-    # Site footprint features
-    site_parts = []
-    site_feature_names = []
-    if site_footprint_columns:
-        for col in site_footprint_columns:
-            if col not in df.columns:
-                continue
-            if col == "has_single_facility":
-
-                def _sf(x: object) -> float:
-                    if pd.isna(x):
-                        return np.nan
-                    return 1.0 if x in (True, "true", "True", "YES", "Yes", 1) else 0.0
-
-                vals = df[col].map(_sf).astype(np.float64)
-                site_parts.append(np.column_stack([vals.values]))
-                site_feature_names.append(col)
-            elif col in ("number_of_facilities", "number_of_countries", "number_of_us_states"):
-                vals = pd.to_numeric(df[col], errors="coerce")
-                site_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                site_feature_names.append(col)
-            elif col == "us_only":
-                vals = pd.to_numeric(df[col], errors="coerce")
-                site_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                site_feature_names.append(col)
-            elif col == "facility_density":
-                vals = pd.to_numeric(df[col], errors="coerce")
-                site_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                site_feature_names.append(col)
-
-    # Design features
-    design_parts = []
-    design_feature_names = []
-    if design_columns:
-        for col in design_columns:
-            if col not in df.columns:
-                continue
-            if col == "randomized":
-                vals = pd.to_numeric(df[col], errors="coerce")
-                design_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                design_feature_names.append(col)
-            elif col == "intervention_model":
-                df["intervention_model_fill"] = df["intervention_model"].fillna("UNKNOWN").astype(str)
-                top_mod = df["intervention_model_fill"].value_counts().head(6).index.tolist()
-                df["intervention_model_trimmed"] = df["intervention_model_fill"].where(
-                    df["intervention_model_fill"].isin(top_mod), "other"
-                )
-                enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-                design_parts.append(enc.fit_transform(df[["intervention_model_trimmed"]]))
-                design_feature_names.extend(enc.get_feature_names_out(["intervention_model_trimmed"]))
-            elif col == "primary_purpose":
-                df["primary_purpose_fill"] = df["primary_purpose"].fillna("OTHER").astype(str)
-                top_pp = df["primary_purpose_fill"].value_counts().head(6).index.tolist()
-                df["primary_purpose_trimmed"] = df["primary_purpose_fill"].where(
-                    df["primary_purpose_fill"].isin(top_pp), "other"
-                )
-                enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-                design_parts.append(enc.fit_transform(df[["primary_purpose_trimmed"]]))
-                design_feature_names.extend(enc.get_feature_names_out(["primary_purpose_trimmed"]))
-            elif col in ("masking_depth_score", "design_complexity_composite"):
-                vals = pd.to_numeric(df[col], errors="coerce")
-                design_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                design_feature_names.append(col)
-
-    # Design outcomes features
-    do_parts = []
-    do_feature_names = []
-    if design_outcomes_columns:
-        for col in design_outcomes_columns:
-            if col not in df.columns:
-                continue
-            if col in ("has_survival_endpoint", "has_safety_endpoint"):
-
-                def _ep(x: object) -> float:
-                    if pd.isna(x):
-                        return np.nan
-                    return 1.0 if x in (True, "true", "True", 1) else 0.0
-
-                vals = df[col].map(_ep).astype(np.float64)
-                do_parts.append(np.column_stack([vals.values]))
-                do_feature_names.append(col)
-            else:
-                vals = pd.to_numeric(df[col], errors="coerce")
-                do_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-                do_feature_names.append(col)
-
-    # Arm/intervention features
-    arm_parts = []
-    arm_feature_names = []
-    if arm_intervention_columns:
-        for col in arm_intervention_columns:
-            if col not in df.columns:
-                continue
-            vals = pd.to_numeric(df[col], errors="coerce")
-            arm_parts.append(np.column_stack([vals.to_numpy(dtype=np.float64, na_value=np.nan)]))
-            arm_feature_names.append(col)
-
-    # Numeric features (n_sponsors: count, 0 = none after merge — keep as-is)
-    enroll = pd.to_numeric(df["enrollment"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
-    n_spon = pd.to_numeric(df["n_sponsors"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
-    n_arms = pd.to_numeric(df["number_of_arms"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
-    sy = pd.to_numeric(df["start_year"], errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
-    X_numeric = np.column_stack([enroll, n_spon, n_arms, sy])
-
-    X = np.hstack(
-        phase_blocks
-        + [cat_encoded]
-        + mesh_parts
-        + int_parts
-        + elig_parts
-        + criteria_parts
-        + site_parts
-        + design_parts
-        + do_parts
-        + arm_parts
-        + [X_numeric]
+    return assemble_feature_matrix(
+        df,
+        eligibility_columns=eligibility_columns,
+        eligibility_criteria_text_columns=eligibility_criteria_text_columns,
+        site_footprint_columns=site_footprint_columns,
+        design_columns=design_columns,
+        arm_intervention_columns=arm_intervention_columns,
+        design_outcomes_columns=design_outcomes_columns,
+        encode_phase=encode_phase,
+        policy=policy,  # type: ignore[arg-type]
+        target_kind=target_kind,
     )
-    X = np.asarray(X, dtype=np.float64)
-
-    phases = df["phase"].astype(str).values
-
-    artifacts = {
-        "phase_encoder": phase_encoder,
-        "cat_encoder": cat_encoder,
-        "mesh_encoder": mesh_encoder,
-        "int_encoder": int_encoder,
-        "elig_encoders": elig_encoders,
-        "elig_feature_names": elig_feature_names,
-        "criteria_text_feature_names": criteria_text_feature_names,
-        "site_feature_names": site_feature_names,
-        "design_feature_names": design_feature_names,
-        "do_feature_names": do_feature_names,
-        "arm_feature_names": arm_feature_names,
-    }
-    return X, y, phases, artifacts
-
-
-def _eval_split(name: str, model: TransformedTargetRegressor, X: np.ndarray, y: np.ndarray) -> dict:
-    y_pred = model.predict(X)
-    return {
-        "set": name,
-        "rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
-        "mae": float(mean_absolute_error(y, y_pred)),
-        "r2": float(r2_score(y, y_pred)),
-    }
 
 
 def _joint_test_metrics_by_phase(
@@ -664,9 +170,9 @@ def _joint_test_metrics_by_phase(
         X_s = X_test[mask]
         if len(y_s) < 2:
             continue
-        ev = _eval_split("test", model, X_s, y_s)
+        ev = evaluate_subset(model, X_s, y_s)
         out[ph] = {
-            "n": int(len(y_s)),
+            "n": ev["n"],
             "r2": ev["r2"],
             "rmse": ev["rmse"],
             "mae": ev["mae"],
@@ -719,7 +225,33 @@ def _train_val_test_split_with_phase(
     return X_train, X_val, X_test, y_train, y_val, y_test, ph_train, ph_val, ph_test
 
 
-def main() -> None:
+def run_training(
+    target_kind: str = DEFAULT_TARGET_KIND,
+    *,
+    feature_policy: str = "baseline",
+    report_path: Path | None = None,
+    random_state: int = 42,
+) -> None:
+    """
+    Full training + report. ``feature_policy='strict_planning'`` uses only planning-safe features
+    (see ``feature_registry``). Splits use ``random_state`` for reproducibility.
+    """
+    if target_kind not in TARGET_KIND_CHOICES:
+        raise ValueError(f"target_kind must be one of {TARGET_KIND_CHOICES}, got {target_kind!r}")
+    if feature_policy not in FEATURE_POLICY_CHOICES:
+        raise ValueError(f"feature_policy must be one of {FEATURE_POLICY_CHOICES}, got {feature_policy!r}")
+
+    out_path = resolve_report_path(target_kind, feature_policy, report_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "Training run: target_kind=%s feature_policy=%s report=%s random_state=%s",
+        target_kind,
+        feature_policy,
+        out_path,
+        random_state,
+    )
+
     df = load_and_join(
         eligibility_columns=KEPT_ELIGIBILITY,
         site_footprint_columns=KEPT_SITE_FOOTPRINT,
@@ -732,7 +264,27 @@ def main() -> None:
     completed["phase"] = completed["phase"].astype(str)
     phase_counts = completed["phase"].value_counts()
 
+    logger.info(
+        "COMPLETED trials cohort: %s rows (counts before per-model target NaN/negative filter)",
+        f"{len(completed):,}",
+    )
+
+    t_label, t_formula = describe_target_kind(target_kind)
     lines: list[str] = []
+    lines.append("REGRESSION TARGET (y) — all RMSE/MAE below are in days for this target")
+    lines.append(f"  target_kind: {target_kind}")
+    lines.append(f"  label: {t_label}")
+    lines.append(f"  definition: {t_formula}")
+    lines.append("")
+    lines.append("FEATURE POLICY")
+    lines.append(f"  feature_policy: {feature_policy}")
+    if feature_policy == "strict_planning":
+        lines.append(
+            "  Planning-safe features only (no start_year, no site-footprint / post-launch operational fields)."
+        )
+    else:
+        lines.append("  Full baseline feature set (historical production configuration).")
+    lines.append("")
     lines.append(
         "HistGradientBoostingRegressor: dedicated models for PHASE1, PHASE2, PHASE3; "
         "early joint (PHASE1+PHASE1/PHASE2+PHASE2) for PHASE1/PHASE2 rows; "
@@ -754,6 +306,8 @@ def main() -> None:
         arm_intervention_columns=KEPT_ARM_INTERVENTION,
         design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
         encode_phase=False,
+        target_kind=target_kind,
+        policy=feature_policy,
     )
 
     # phase_label -> (test_n, test_r2, model_description)
@@ -766,8 +320,9 @@ def main() -> None:
         df_p = completed[completed["phase"] == phase].copy()
         n_phase = len(df_p)
         lines.append("=" * 50)
-        lines.append(f"MODEL dedicated {phase}  (n={n_phase:,} rows before dropna on target)")
+        lines.append(f"MODEL dedicated {phase}  [y={target_kind}]")
         lines.append("=" * 50)
+        lines.append(f"  Rows before target filter: {n_phase:,}")
 
         if n_phase < 30:
             lines.append("  Skipped: not enough rows for a stable train/val/test split.")
@@ -776,14 +331,22 @@ def main() -> None:
 
         X, y, _, _ = prepare_features(df_p, **prep_kw)
         n_xy = len(y)
-        lines.append(f"  After target present: n={n_xy:,}")
+        logger.info(
+            "Dedicated %s: before_target=%s after_target=%s",
+            phase,
+            f"{n_phase:,}",
+            f"{n_xy:,}",
+        )
+        lines.append(f"  Rows after target filter (finite, non-negative y): {n_xy:,}")
 
         if n_xy < 30:
-            lines.append("  Skipped: too few rows with duration_days after preprocessing.")
+            lines.append("  Skipped: too few rows after target (missing/invalid/negative filter).")
             lines.append("")
             continue
 
-        X_train, X_val, X_test, y_train, y_val, y_test = _train_val_test_split(X, y)
+        X_train, X_val, X_test, y_train, y_val, y_test = _train_val_test_split(
+            X, y, random_state=random_state
+        )
         lines.append(
             f"  Split: train={len(y_train):,}  val={len(y_val):,}  test={len(y_test):,}"
         )
@@ -796,12 +359,10 @@ def main() -> None:
             ("val", X_val, y_val),
             ("test", X_test, y_test),
         ):
-            m = _eval_split(split_name, model, X_s, y_s)
-            lines.append(
-                f"  {m['set']:5}: RMSE={m['rmse']:,.0f} days  MAE={m['mae']:,.0f} days  R²={m['r2']:.4f}"
-            )
+            m = evaluate_sklearn_split(split_name, model, X_s, y_s)
+            lines.append(metrics_report_line(m))
 
-        test_m = _eval_split("test", model, X_test, y_test)
+        test_m = evaluate_sklearn_split("test", model, X_test, y_test)
         summary[phase] = (len(y_test), test_m["r2"], f"dedicated {phase}-only")
         lines.append("")
 
@@ -809,21 +370,27 @@ def main() -> None:
     df_early = completed[completed["phase"].isin(EARLY_JOINT_PHASES)].copy()
     lines.append("=" * 50)
     lines.append(
-        f"MODEL early joint  (PHASE1 + PHASE1/PHASE2 + PHASE2; n={len(df_early):,} before dropna)"
+        f"MODEL early joint  (PHASE1 + PHASE1/PHASE2 + PHASE2) [y={target_kind}]"
     )
     lines.append("=" * 50)
+    lines.append(f"  Rows before target filter: {len(df_early):,}")
     if len(df_early) < 30:
         lines.append("  Skipped: cohort too small.")
         lines.append("")
     else:
         X_e, y_e, ph_e, _ = prepare_features(df_early, **prep_kw)
-        lines.append(f"  After target present: n={len(y_e):,}")
+        logger.info(
+            "Early joint pool: before_target=%s after_target=%s",
+            f"{len(df_early):,}",
+            f"{len(y_e):,}",
+        )
+        lines.append(f"  Rows after target filter (finite, non-negative y): {len(y_e):,}")
         if len(y_e) < 30:
-            lines.append("  Skipped: too few rows after preprocessing.")
+            lines.append("  Skipped: too few rows after target (missing/invalid/negative filter).")
             lines.append("")
         else:
             X_tr, X_va, X_te_e, y_tr, y_va, y_te_e, _, _, ph_te_e = _train_val_test_split_with_phase(
-                X_e, y_e, ph_e
+                X_e, y_e, ph_e, random_state=random_state
             )
             lines.append(
                 f"  Split: train={len(y_tr):,}  val={len(y_va):,}  test={len(y_te_e):,}  (all early-pool phases)"
@@ -835,10 +402,8 @@ def main() -> None:
                 ("val", X_va, y_va),
                 ("test", X_te_e, y_te_e),
             ):
-                m = _eval_split(split_name, m_early, X_s, y_s)
-                lines.append(
-                    f"  {m['set']:5}: RMSE={m['rmse']:,.0f} days  MAE={m['mae']:,.0f} days  R²={m['r2']:.4f}"
-                )
+                m = evaluate_sklearn_split(split_name, m_early, X_s, y_s)
+                lines.append(metrics_report_line(m))
             early_by_phase = _joint_test_metrics_by_phase(
                 m_early,
                 X_te_e,
@@ -851,10 +416,7 @@ def main() -> None:
                     lines.append(f"  test ({ph} subset): too few rows for R².")
                     continue
                 d = early_by_phase[ph]
-                lines.append(
-                    f"  test ({ph} subset): n={d['n']:,}  "
-                    f"RMSE={d['rmse']:,.0f}  MAE={d['mae']:,.0f}  R²={d['r2']:.4f}"
-                )
+                lines.append(joint_subset_report_line(ph, d))
             if "PHASE1/PHASE2" in early_by_phase:
                 d12 = early_by_phase["PHASE1/PHASE2"]
                 summary["PHASE1/PHASE2"] = (
@@ -868,21 +430,27 @@ def main() -> None:
     df_late = completed[completed["phase"].isin(LATE_JOINT_PHASES)].copy()
     lines.append("=" * 50)
     lines.append(
-        f"MODEL late joint  (PHASE2 + PHASE2/PHASE3 + PHASE3; n={len(df_late):,} before dropna)"
+        f"MODEL late joint  (PHASE2 + PHASE2/PHASE3 + PHASE3) [y={target_kind}]"
     )
     lines.append("=" * 50)
+    lines.append(f"  Rows before target filter: {len(df_late):,}")
     if len(df_late) < 30:
         lines.append("  Skipped: cohort too small.")
         lines.append("")
     else:
         X_l, y_l, ph_l, _ = prepare_features(df_late, **prep_kw)
-        lines.append(f"  After target present: n={len(y_l):,}")
+        logger.info(
+            "Late joint pool: before_target=%s after_target=%s",
+            f"{len(df_late):,}",
+            f"{len(y_l):,}",
+        )
+        lines.append(f"  Rows after target filter (finite, non-negative y): {len(y_l):,}")
         if len(y_l) < 30:
-            lines.append("  Skipped: too few rows after preprocessing.")
+            lines.append("  Skipped: too few rows after target (missing/invalid/negative filter).")
             lines.append("")
         else:
             X_tr, X_va, X_te_l, y_tr, y_va, y_te_l, _, _, ph_te_l = _train_val_test_split_with_phase(
-                X_l, y_l, ph_l
+                X_l, y_l, ph_l, random_state=random_state
             )
             lines.append(
                 f"  Split: train={len(y_tr):,}  val={len(y_va):,}  test={len(y_te_l):,}  (all late-pool phases)"
@@ -894,10 +462,8 @@ def main() -> None:
                 ("val", X_va, y_va),
                 ("test", X_te_l, y_te_l),
             ):
-                m = _eval_split(split_name, m_late, X_s, y_s)
-                lines.append(
-                    f"  {m['set']:5}: RMSE={m['rmse']:,.0f} days  MAE={m['mae']:,.0f} days  R²={m['r2']:.4f}"
-                )
+                m = evaluate_sklearn_split(split_name, m_late, X_s, y_s)
+                lines.append(metrics_report_line(m))
             late_by_phase = _joint_test_metrics_by_phase(
                 m_late,
                 X_te_l,
@@ -910,10 +476,7 @@ def main() -> None:
                     lines.append(f"  test ({ph} subset): too few rows for R².")
                     continue
                 d = late_by_phase[ph]
-                lines.append(
-                    f"  test ({ph} subset): n={d['n']:,}  "
-                    f"RMSE={d['rmse']:,.0f}  MAE={d['mae']:,.0f}  R²={d['r2']:.4f}"
-                )
+                lines.append(joint_subset_report_line(ph, d))
             if "PHASE2/PHASE3" in late_by_phase:
                 d23 = late_by_phase["PHASE2/PHASE3"]
                 summary["PHASE2/PHASE3"] = (
@@ -925,26 +488,35 @@ def main() -> None:
 
     # --- Baseline: old approach (dedicated model trained only on mixed-phase rows) ---
     lines.append("=" * 50)
-    lines.append("BASELINE — dedicated model on mixed-phase rows only (previous approach)")
+    lines.append(
+        f"BASELINE — dedicated model on mixed-phase rows only (previous approach) [y={target_kind}]"
+    )
     lines.append("=" * 50)
     for mix_phase in ("PHASE1/PHASE2", "PHASE2/PHASE3"):
         df_m = completed[completed["phase"] == mix_phase].copy()
         n_m = len(df_m)
-        lines.append(f"  {mix_phase} cohort: n={n_m:,} before dropna")
+        lines.append(f"  {mix_phase} cohort rows before target filter: {n_m:,}")
         if n_m < 30:
             lines.append(f"    Skipped: too few rows.")
             continue
         X_m, y_m, _, _ = prepare_features(df_m, **prep_kw)
+        logger.info(
+            "Mixed-phase %s: before_target=%s after_target=%s",
+            mix_phase,
+            f"{n_m:,}",
+            f"{len(y_m):,}",
+        )
+        lines.append(f"    Rows after target filter: {len(y_m):,}")
         if len(y_m) < 30:
-            lines.append(f"    Skipped after dropna: n={len(y_m):,}")
+            lines.append(f"    Skipped after target filter: too few rows.")
             continue
-        X_tr, X_va, X_te, y_tr, y_va, y_te = _train_val_test_split(X_m, y_m)
+        X_tr, X_va, X_te, y_tr, y_va, y_te = _train_val_test_split(
+            X_m, y_m, random_state=random_state
+        )
         base = _new_regressor()
         base.fit(X_tr, y_tr)
-        te = _eval_split("test", base, X_te, y_te)
-        lines.append(
-            f"    test: n={len(y_te):,}  RMSE={te['rmse']:,.0f}  MAE={te['mae']:,.0f}  R²={te['r2']:.4f}"
-        )
+        te = evaluate_sklearn_split("test", base, X_te, y_te)
+        lines.append(mixed_cohort_test_line(len(y_te), te))
     lines.append("")
     lines.append(
         "Interpretation: baseline R² uses a test split drawn only from the mixed-phase cohort; "
@@ -954,7 +526,9 @@ def main() -> None:
     lines.append("")
 
     lines.append("=" * 50)
-    lines.append("TABLE — JOINT MODELS, ALL PHASE SUBSETS (that phase's rows in the joint test fold)")
+    lines.append(
+        f"TABLE — JOINT MODELS, ALL PHASE SUBSETS (that phase's rows in the joint test fold) [y={target_kind}]"
+    )
     lines.append("Phase\tWhich model\tTest n\tR²\tRMSE (days)\tMAE (days)")
     joint_comparison_order: list[tuple[str, str]] = [
         ("PHASE1", "JOINT_EARLY"),
@@ -975,7 +549,9 @@ def main() -> None:
     lines.append("")
 
     lines.append("=" * 50)
-    lines.append("TABLE — BEST JOINT PER LABEL (highest test R² when both joints cover the label)")
+    lines.append(
+        f"TABLE — BEST JOINT PER LABEL (highest test R² when both joints cover the label) [y={target_kind}]"
+    )
     lines.append("Phase\tWhich model\tTest n\tR²\tRMSE (days)\tMAE (days)")
     for ph in PHASE_REPORT_ORDER:
         cands: list[tuple[str, dict]] = []
@@ -992,7 +568,7 @@ def main() -> None:
     lines.append("")
 
     lines.append("=" * 50)
-    lines.append("SUMMARY — TEST R² BY ROW PHASE (model used for that label)")
+    lines.append(f"SUMMARY — TEST R² BY ROW PHASE (model used for that label) [y={target_kind}]")
     lines.append("=" * 50)
     for ph in PHASE_REPORT_ORDER:
         if ph in summary:
@@ -1001,12 +577,75 @@ def main() -> None:
         else:
             lines.append(f"  {ph}: n/a  (skipped or insufficient test rows)")
     lines.append("=" * 50)
+    lines.append(
+        f"End of report — target_kind={target_kind!r} feature_policy={feature_policy!r}"
+    )
+    lines.append("=" * 50)
 
     report = "\n".join(lines)
     print(report)
-    (RESULTS_DIR / "regression_report.txt").write_text(report)
-    logger.info("Wrote %s", RESULTS_DIR / "regression_report.txt")
+    out_path.write_text(report)
+    logger.info(
+        "Wrote %s (target_kind=%s feature_policy=%s)",
+        out_path,
+        target_kind,
+        feature_policy,
+    )
+
+
+def main(
+    target_kind: str = DEFAULT_TARGET_KIND,
+    *,
+    feature_policy: str = "baseline",
+    report_path: Path | None = None,
+    random_state: int = 42,
+) -> None:
+    """Programmatic entry (same defaults as CLI)."""
+    run_training(
+        target_kind,
+        feature_policy=feature_policy,
+        report_path=report_path,
+        random_state=random_state,
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train per-phase duration regression models.")
+    parser.add_argument(
+        "--target",
+        dest="target_kind",
+        choices=list(TARGET_KIND_CHOICES),
+        default=DEFAULT_TARGET_KIND,
+        help="Regression target: primary_completion (default, matches preprocess duration_days), "
+        "post_primary_completion, or total_completion (see targets.py).",
+    )
+    parser.add_argument(
+        "--feature-policy",
+        dest="feature_policy",
+        choices=list(FEATURE_POLICY_CHOICES),
+        default="baseline",
+        help="baseline (full features) or strict_planning (planning-safe registry only).",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="Output report path (default: regression_report.txt for baseline primary, else auto-named).",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random seed for train/val/test splits (default: 42).",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    _args = _parse_args()
+    run_training(
+        _args.target_kind,
+        feature_policy=_args.feature_policy,
+        report_path=_args.report,
+        random_state=_args.random_state,
+    )
