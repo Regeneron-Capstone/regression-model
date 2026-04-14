@@ -1,10 +1,4 @@
-"""
-Feature matrix assembly for trial duration regression.
-
-Splits the former monolithic ``prepare_features`` into named builders and a single
-entrypoint ``assemble_feature_matrix``. Policy ``baseline`` matches historical
-training; ``strict_planning`` drops columns flagged in ``feature_registry``.
-"""
+"""Step 01: Construct the feature matrix from the cohort using domain-driven feature groups."""
 from __future__ import annotations
 
 import logging

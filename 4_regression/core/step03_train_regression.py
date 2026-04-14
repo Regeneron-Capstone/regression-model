@@ -1,25 +1,4 @@
-"""
-Main entrypoint for stage 4 regression pipeline.
-
-Flow:
-1. Load cohort (step00_cohort_io)
-2. Build features (step01_features)
-3. Attach targets (step02_targets)
-4. Train models
-5. Evaluate and write reports (step04_evaluation)
-
-Join studies with sponsors, select features, train/val/test split,
-and run regression to predict a configurable duration target (default: primary_completion / duration_days).
-
-Target is log1p-transformed inside TransformedTargetRegressor; predictions are
-inverted to days for evaluation. Restricted to COMPLETED trials only.
-
-Trains HistGradientBoostingRegressor models on COMPLETED trials:
-  - Dedicated: PHASE1, PHASE2, PHASE3 (each fit on that phase only).
-  - Early joint: PHASE1 + PHASE1/PHASE2 + PHASE2; used to score PHASE1/PHASE2 trials.
-  - Late joint: PHASE2 + PHASE2/PHASE3 + PHASE3; used to score PHASE2/PHASE3 trials.
-No StandardScaler; numeric NaNs are kept for HGBR. No phase one-hot inside each cohort.
-"""
+"""Step 03: Train phase-specific regression models and generate evaluation reports."""
 
 import argparse
 import logging

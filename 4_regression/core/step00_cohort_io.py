@@ -1,10 +1,4 @@
-"""
-Load and join completed clinical trial records for modeling (0_data/clean_data + 0_data/raw_data).
-
-This module is the single I/O entry for the completed-study frame used by regression,
-deviation analysis, and related tools. ``train_regression.load_and_join`` re-exports
-this function for backward compatibility.
-"""
+"""Step 00: Load and assemble the modeling cohort from cleaned clinical trial tables."""
 from __future__ import annotations
 
 import re

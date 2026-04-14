@@ -120,7 +120,7 @@ Key scripts:
 
 | Script | Purpose |
 |---|---|
-| `train_regression.py` | Primary completion model (baseline features) |
+| `core/step03_train_regression.py` | Primary completion model (baseline features) |
 | `train_post_primary_planning.py` | Post-primary completion model (planning features) |
 | `combined_duration_forecast.py` | Two-stage total duration forecast |
 | `late_risk_classifier.py` | Binary late-risk classification |

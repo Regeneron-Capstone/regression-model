@@ -1,10 +1,4 @@
-"""
-Structured regression and deviation-style metrics for trial duration models.
-
-Core metrics (RMSE, MAE, R²) match ``sklearn`` definitions used in ``train_regression``.
-Percentage deviation metrics follow ``targets.calculate_pct_deviation`` and the reporting
-style in ``5_deviation/deviation_analysis.py`` (MAPE = mean(|pct_dev|), pandas-style std).
-"""
+"""Step 04: Compute regression metrics and format evaluation outputs."""
 from __future__ import annotations
 
 from typing import Any, Iterable, Sequence

@@ -1,13 +1,4 @@
-"""
-Target construction and deviation metrics for trial duration modeling.
-
-Formulas match ClinicalTrials.gov-style date fields on `studies`:
-- start_date
-- primary_completion_date  (end of primary data collection / primary completion)
-- completion_date         (study completion)
-
-All day deltas use calendar-day difference via pandas (same as preprocess.py for duration_days).
-"""
+"""Step 02: Define duration targets and derived metrics for modeling and evaluation."""
 from __future__ import annotations
 
 from typing import Literal
