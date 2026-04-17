@@ -232,14 +232,14 @@ The three CCSR slots are **compacted left**: within each trial, the slots are fi
 | `MBD` | Mental and behavioral disorders | Depression, anxiety, schizophrenia, bipolar disorder, ADHD, autism, substance use disorders | 26,979 |
 | `MUS` | Musculoskeletal system and connective tissue diseases | Arthritis (RA, OA, psoriatic), osteoporosis, lupus, gout, fibromyalgia, back pain | 22,467 |
 | `INF` | Infectious and parasitic diseases | Bacterial, viral, fungal, and parasitic infections — including HIV, COVID-19, hepatitis, TB | 21,569 |
-| `DIG` | Digestive system diseases | GI tract conditions — IBD, Crohn's, ulcerative colitis, GERD, liver disease, pancreatitis | 20,818 |
+| `DIG` | Digestive, hepatobiliary, and pancreatic diseases | GI tract conditions — IBD, Crohn's, ulcerative colitis, GERD, liver disease, pancreatitis | 20,818 |
 | `RSP` | Respiratory system diseases | Asthma, COPD, pulmonary fibrosis, pulmonary hypertension, pneumonia, cystic fibrosis | 19,726 |
-| `SYM` | Symptoms, signs, and ill-defined conditions | Non-specific findings not yet classified to a disease — pain, fatigue, fever, dyspnea | 17,195 |
-| `GEN` | Genitourinary system diseases | Kidney disease (CKD, nephritis), bladder conditions, urinary tract infections, sexual disorders | 14,915 |
+| `SYM` | Symptoms, signs, and ill-defined conditions | Residual symptom/sign bucket for non-specific clinical findings not mapped to a more specific disease category (e.g., pain, fatigue, fever, dyspnea) | 17,195 |
+| `GEN` | Kidney, urinary tract, and reproductive/genitourinary conditions | Kidney disease (CKD, nephritis), bladder conditions, urinary tract infections, sexual disorders | 14,915 |
 | `EYE` | Eye and adnexa diseases | Glaucoma, macular degeneration, diabetic retinopathy, uveitis, dry eye, cataracts | 10,724 |
 | `SKN` | Skin and subcutaneous tissue diseases | Psoriasis, eczema/atopic dermatitis, acne, alopecia, wound healing, skin infections | 7,414 |
-| `PRG` | Pregnancy, childbirth, and puerperium | Obstetric conditions, gestational diabetes, preeclampsia, preterm birth | 5,795 |
-| `BLD` | Diseases of blood and blood-forming organs | Anemia (aplastic, hemolytic, sickle cell), coagulation disorders, white blood cell disorders, immune deficiencies | 5,608 |
+| `PRG` | Maternal and obstetric conditions related to pregnancy and childbirth | Obstetric conditions, gestational diabetes, preeclampsia, preterm birth | 5,795 |
+| `BLD` | Hematologic and blood-forming disorders | Anemia (aplastic, hemolytic, sickle cell), coagulation disorders, white blood cell disorders, immune deficiencies | 5,608 |
 | `MAL` | Congenital malformations, deformations, and chromosomal abnormalities | Birth defects, structural anomalies, Down syndrome, chromosomal disorders | 4,653 |
 | `INJ` | Injury, poisoning, and consequences of external causes | Traumatic injuries, fractures, burns, toxic exposures, sequelae of injury | 4,202 |
 | `PNL` | Perinatal conditions | Conditions originating in the perinatal period — prematurity, neonatal jaundice, birth asphyxia | 3,132 |
