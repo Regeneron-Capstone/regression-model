@@ -31,6 +31,48 @@ Step 03 — CCSR Join                  stage3_with_ccsr.csv  (long form)
 
 ---
 
+## Setup — Required Data Files
+
+Before running any pipeline step, two external data sources must be in place:
+
+### 1. AACT raw data (`raw_data/`)
+
+Provided by the team via BigQuery export or direct file share. Run the download scripts in `1_scripts/` if connecting to BigQuery directly. The condition mapping pipeline specifically requires:
+
+| File | Used by |
+|---|---|
+| `raw_data/conditions_raw.csv` | Step 00, 01 |
+| `raw_data/browse_conditions.csv` | Step 01 |
+| `raw_data/studies.csv` | Step 02b (enrollment lookup) |
+
+### 2. DXCCSR reference file (`raw_data/condition_mapping_data/DXCCSR_v2026-1.csv`)
+
+Free download from AHRQ. Steps:
+
+1. Go to **https://hcup-us.ahrq.gov/toolssoftware/ccsr/dxccsr.jsp**
+2. Download **DXCCSR v2026.1** (the "Diagnosis" version — not PCS)
+3. Place `DXCCSR_v2026-1.csv` in `raw_data/condition_mapping_data/`
+
+> The file path must be exactly: `raw_data/condition_mapping_data/DXCCSR_v2026-1.csv`  
+> Used by Step 02 (ICD-10 lookup) and Step 03 (CCSR join).
+
+### Run order
+
+Once both data sources are in place, run steps in order:
+
+```bash
+python 3_preprocessing/preprocess.py
+python 2_condition_mapping/step00_exclusion_taxonomy.py
+python 2_condition_mapping/step01_normalize.py
+python 2_condition_mapping/step02_icd10_lookup.py
+python 2_condition_mapping/step02b_coverage_review.py   # optional — review queue ranking
+python 2_condition_mapping/step03_ccsr_join.py
+```
+
+All outputs are written to `2_condition_mapping/output/` and `clean_data/` and are not tracked in git (regenerate from source).
+
+---
+
 ## Stage 0 — Exclusion Taxonomy
 
 **Script:** `step00_exclusion_taxonomy.py`  
