@@ -7,8 +7,9 @@ from pathlib import Path
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-CLEAN_DATA = PROJECT_ROOT / "0_data" / "clean_data"
-RAW_DATA = PROJECT_ROOT / "0_data" / "raw_data"
+CLEAN_DATA = PROJECT_ROOT / "clean_data"
+RAW_DATA = PROJECT_ROOT / "raw_data"
+CONDITION_FEATURES = PROJECT_ROOT / "2_condition_mapping" / "output" / "stage3_nct_features.csv"
 
 
 def _parse_time_frame_days(tf: str) -> float | None:
@@ -39,6 +40,20 @@ def _has_endpoint_keywords(text: str, keywords: list[str]) -> bool:
     return any(k in t for k in keywords)
 
 
+CCSR_COLS = [
+    "ccsr_slot1", "ccsr_slot2", "ccsr_slot3",
+    "ccsr_domain",
+    "has_ccsr",
+    "metastatic_flag", "relapsed_refractory_flag",
+    "pediatric_flag", "adult_flag", "biomarker_flag",
+    "tier_b_only_flag",
+]
+CCSR_FLAG_COLS = [
+    "has_ccsr", "metastatic_flag", "relapsed_refractory_flag",
+    "pediatric_flag", "adult_flag", "biomarker_flag", "tier_b_only_flag",
+]
+
+
 def load_and_join(
     eligibility_columns: list[str] | None = None,
     site_footprint_columns: list[str] | None = None,
@@ -46,30 +61,62 @@ def load_and_join(
     arm_intervention_columns: list[str] | None = None,
     design_outcomes_columns: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Load clean studies, sponsors, and categorized_output; join on nct_id.
+    """Load clean studies, sponsors, and condition features; join on nct_id.
     If eligibility_columns is provided, join eligibilities table for those columns.
+
+    Disease features come from stage3_nct_features.csv (CCSR-based condition mapping),
+    joined LEFT on nct_id.  Trials with no mapped condition get has_ccsr=0 and null slots.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     studies = pd.read_csv(CLEAN_DATA / "studies.csv", low_memory=False)
     sponsors = pd.read_csv(CLEAN_DATA / "sponsors.csv", low_memory=False)
 
-    # Restrict to COMPLETED trials only (actual duration)
+    # Restrict to COMPLETED trials only (actual duration known)
     studies = studies[studies["overall_status"] == "COMPLETED"].copy()
+    n_before_join = len(studies)
+    logger.info("Cohort before condition join (COMPLETED): %s", f"{n_before_join:,}")
 
     # Aggregate sponsors: count per nct_id
     sponsor_counts = sponsors.groupby("nct_id").size().reset_index(name="n_sponsors")
     df = studies.merge(sponsor_counts, on="nct_id", how="left")
     df["n_sponsors"] = df["n_sponsors"].fillna(0).astype(int)
 
-    # Join category from categorized_output (take highest-confidence per trial)
-    categorized = pd.read_csv(RAW_DATA / "categorized_output.csv", low_memory=False)
-    cat_agg = (
-        categorized.sort_values("confidence", ascending=False)
-        .groupby("nct_id")[["category"]]
-        .first()
-        .reset_index()
-    )
-    df = df.merge(cat_agg, on="nct_id", how="left")
-    df["category"] = df["category"].fillna("Other_Unclassified")
+    # ── Join CCSR condition features (replaces categorized_output.csv) ────────
+    cond_feat = pd.read_csv(CONDITION_FEATURES, low_memory=False)
+    cols_to_join = ["nct_id"] + [c for c in CCSR_COLS if c in cond_feat.columns]
+    df = df.merge(cond_feat[cols_to_join], on="nct_id", how="left")
+
+    # Defaults for unmatched trials
+    for col in CCSR_FLAG_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna(0).astype(int)
+
+    # ── Diagnostics ──────────────────────────────────────────────────────────
+    n_after_join = len(df)
+    n_matched = df["nct_id"].isin(cond_feat["nct_id"]).sum()
+    has_ccsr_n = df["has_ccsr"].sum() if "has_ccsr" in df.columns else 0
+    slot1_n = df["ccsr_slot1"].notna().sum() if "ccsr_slot1" in df.columns else 0
+
+    logger.info("Cohort after condition join: %s (row count unchanged: %s)",
+                f"{n_after_join:,}", n_after_join == n_before_join)
+    logger.info("Matched nct_ids from stage3_nct_features: %s / %s",
+                f"{n_matched:,}", f"{n_before_join:,}")
+    logger.info("has_ccsr=1: %s (%.1f%%)", f"{has_ccsr_n:,}",
+                100 * has_ccsr_n / max(n_after_join, 1))
+    logger.info("ccsr_slot1 non-null: %s (%.1f%%)", f"{slot1_n:,}",
+                100 * slot1_n / max(n_after_join, 1))
+    if "ccsr_domain" in df.columns:
+        top_domain = df["ccsr_domain"].value_counts().head(10)
+        logger.info("Top 10 ccsr_domain:\n%s", top_domain.to_string())
+    if "ccsr_slot1" in df.columns:
+        top_slot1 = df["ccsr_slot1"].value_counts().head(10)
+        logger.info("Top 10 ccsr_slot1:\n%s", top_slot1.to_string())
+
+    # category column: derive from ccsr_domain for downstream compatibility
+    # (replaces the old categorized_output.csv "category" feature)
+    df["category"] = df["ccsr_domain"].fillna("Other_Unclassified")
 
     # Join downcase_mesh_term from browse_conditions (first per trial)
     bc_path = RAW_DATA / "browse_conditions.csv"

@@ -2,7 +2,7 @@
 Explore eligibility *criteria* free text in eligibilities.csv for future NLP-style features:
 text length, inclusion/exclusion tilde counts, procedure-burden keywords.
 
-Data: 0_data/raw_data/eligibilities.csv — column `criteria` holds the full text block.
+Data: raw_data/eligibilities.csv — column `criteria` holds the full text block.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ BURDEN_KEYWORDS = [
     "cardiac catheterization",
 ]
 
-RAW_DATA = PROJECT_ROOT / "0_data" / "raw_data"
+RAW_DATA = PROJECT_ROOT / "raw_data"
 OUTPUT_DIR = PROJECT_ROOT / "2_data_exploration" / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

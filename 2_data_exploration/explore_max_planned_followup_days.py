@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).parent.parent
-CLEAN_DATA = PROJECT_ROOT / "0_data" / "clean_data"
-RAW_DATA = PROJECT_ROOT / "0_data" / "raw_data"
+CLEAN_DATA = PROJECT_ROOT / "clean_data"
+RAW_DATA = PROJECT_ROOT / "raw_data"
 OUTPUT_DIR = PROJECT_ROOT / "2_data_exploration" / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

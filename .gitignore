@@ -1,7 +1,13 @@
 # Data
 0_data/raw_data/
 0_data/clean_data/
+raw_data/
+clean_data/
 6_results/
+
+# Condition mapping — generated outputs (large CSVs, regenerate by running pipeline)
+2_condition_mapping/output/
+2_condition_mapping/cache/
 
 # Exploration outputs
 2_data_exploration/outputs/

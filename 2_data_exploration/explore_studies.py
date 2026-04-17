@@ -13,7 +13,7 @@ import seaborn as sns
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-RAW_DATA = PROJECT_ROOT / "0_data" / "raw_data"
+RAW_DATA = PROJECT_ROOT / "raw_data"
 OUTPUT_DIR = PROJECT_ROOT / "2_data_exploration" / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

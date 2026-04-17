@@ -1,6 +1,6 @@
 """
 Preprocess studies and sponsors with filtering criteria.
-Saves to 0_data/clean_data folder.
+Saves to clean_data folder.
 """
 import logging
 from pathlib import Path
@@ -9,8 +9,8 @@ import pandas as pd
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-RAW_DATA = PROJECT_ROOT / "0_data" / "raw_data"
-CLEAN_DATA = PROJECT_ROOT / "0_data" / "clean_data"
+RAW_DATA = PROJECT_ROOT / "raw_data"
+CLEAN_DATA = PROJECT_ROOT / "clean_data"
 OUTPUT_DIR = CLEAN_DATA
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
