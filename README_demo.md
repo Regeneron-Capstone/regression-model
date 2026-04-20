@@ -50,6 +50,14 @@ Primary-completion regression — test metrics (days):
 
 Late-risk classifier — test split (decision threshold **0.6**): precision **0.5444**, recall **0.4759**, F1 **0.5079**, ROC-AUC **0.7771**, PR-AUC **0.5741**.
 
+Top permutation-importance features (normalized; full list in `6_results/feature_importance_rankings.txt`):
+
+| Rank | Baseline regression (R²) | Late-risk classifier (ROC-AUC) |
+|:---:|---|---|
+| 1 | `max_planned_followup_days` (0.160) | `max_planned_followup_days` (0.208) |
+| 2 | `start_year` (0.058) | `category_NEO` (0.116) |
+| 3 | `category_NEO` (0.045) | `enrollment` (0.082) |
+
 ## 6. Regression R²: Paper vs Ours (test set)
 
 | Phase | TrialBench (Chen et al., 2025) | This project |
@@ -79,3 +87,5 @@ Interpretation: on this benchmark setup, our simpler tabular pipeline (phase-awa
 ## 9. Notes
 
 - Features are designed to capture trial design and operational complexity.
+- Late-risk classifier uses a probability **cutoff of 0.6** for positive predictions (adjustable via `--decision-threshold`).
+- Rank feature importance (permutation) via `PYTHONPATH=4_regression python 4_regression/experiments/feature_importance_ranking.py` → `6_results/feature_importance_rankings.txt`.

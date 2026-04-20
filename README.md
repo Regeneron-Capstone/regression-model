@@ -126,10 +126,11 @@ Key scripts:
 |---|---|
 | `core/step03_train_regression.py` | Primary completion model (baseline features) |
 | `train_post_primary_planning.py` | Post-primary completion model (planning features) |
-| `combined_duration_forecast.py` | Two-stage total duration forecast |
-| `late_risk_classifier.py` | Binary late-risk classification |
-| `planning_experiment_runner.py` | Full five-stage experiment orchestrator |
-| `deviation_analysis.py` | Prediction error and accuracy-band analysis |
+| `experiments/combined_duration_forecast.py` | Two-stage total duration forecast |
+| `experiments/late_risk_classifier.py` | Binary late-risk classification |
+| `experiments/planning_experiment_runner.py` | Full five-stage experiment orchestrator |
+| `experiments/feature_importance_ranking.py` | Permutation-importance ranking for both models |
+| `5_deviation/deviation_analysis.py` | Prediction error and accuracy-band analysis |
 | `build_final_comparison_report.py` | Baseline vs. staged model comparison |
 | `compare_feature_policies.py` | Baseline vs. strict-planning feature comparison |
 
@@ -241,6 +242,24 @@ The following values are from the latest end-to-end execution in this repository
   - `PHASE1/PHASE2` (early joint): **R²=0.3571**, RMSE=606 days, MAE=419 days
   - `PHASE2/PHASE3` (late joint): **R²=0.2465**, RMSE=576 days, MAE=380 days
 - Late-risk classifier (test split, probability threshold 0.6): **precision=0.5444**, **recall=0.4759**, **F1=0.5079**, **ROC-AUC=0.7771**, **PR-AUC=0.5741**
+
+### Feature Importance
+
+Permutation importance (scored on the train fold; normalized to sum to 1 per model). Full rankings in `6_results/feature_importance_rankings.txt`.
+
+| Rank | Baseline regression (scoring=R²) | Late-risk classifier (scoring=ROC-AUC) |
+|:---:|---|---|
+| 1 | `max_planned_followup_days` (0.160) | `max_planned_followup_days` (0.208) |
+| 2 | `start_year` (0.058) | `category_NEO` (0.116) |
+| 3 | `category_NEO` (0.045) | `enrollment` (0.082) |
+| 4 | `maximum_age` (0.043) | `maximum_age` (0.055) |
+| 5 | `enrollment` (0.034) | `eligibility_n_inclusion_tildes` (0.031) |
+
+Re-run with:
+
+```bash
+PYTHONPATH=4_regression python 4_regression/experiments/feature_importance_ranking.py
+```
 
 ### Deviation Metrics
 
@@ -391,6 +410,12 @@ PYTHONPATH=4_regression python 4_regression/experiments/combined_duration_foreca
 PYTHONPATH=4_regression python 4_regression/experiments/late_risk_classifier.py
 ```
 
+### Feature importance ranking
+
+```bash
+PYTHONPATH=4_regression python 4_regression/experiments/feature_importance_ranking.py
+```
+
 ### Deviation analysis
 
 ```bash
@@ -416,12 +441,15 @@ python tests/validate_targets.py
 
 | Path | Contents |
 |---|---|
-| `final_results_capstone.txt` | Latest end-to-end regression + late-risk metrics (capstone summary) |
+| `6_results/final_results_capstone.txt` | Latest end-to-end regression + late-risk metrics (capstone summary) |
+| `6_results/feature_importance_rankings.txt` | Permutation-importance rankings for both models |
 | `0_data/clean_data/studies.csv` | Preprocessed trial records |
 | `0_data/clean_data/preprocessing_summary.txt` | Filtering summary |
 | `0_data/clean_data/enrollment_stats_by_phase.csv` | Enrollment statistics by phase |
 | `6_results/regression_report.txt` | Primary completion model results |
 | `6_results/regression_report_post_primary_completion_strict_planning.txt` | Post-primary model results |
+| `6_results/late_risk_classification_report.txt` | Late-risk classifier metrics + per-group threshold table |
+| `6_results/late_risk_predictions.csv` | Per-trial late-risk probabilities and labels |
 | `6_results/experiments/<UTC_timestamp>/` | Full experiment output directory |
 | `6_results/experiments/<UTC_timestamp>/predictions.csv` | Per-trial predictions |
 | `6_results/experiments/<UTC_timestamp>/deviation_summary.txt` | Deviation analysis report |

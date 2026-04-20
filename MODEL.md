@@ -67,6 +67,15 @@ Reported metrics (train / val / test): precision, recall, F1, ROC-AUC, PR-AUC, p
 - **Deviation:** `5_deviation/deviation_analysis.py` — percent deviation of actual vs predicted for configurable targets; **`--target combined`** consumes the combined forecast CSV.
 - **Baseline vs staged summary:** `4_regression/build_final_comparison_report.py` aggregates regression reports, optional **`baseline_metadata.json`**, optional **frozen** primary regression report, and the late-risk report into **`final_comparison_metrics.csv`** and a Markdown (optional TXT) narrative.
 
+## Feature importance (`4_regression/experiments/feature_importance_ranking.py`)
+
+Permutation-importance report for both models, written to **`6_results/feature_importance_rankings.txt`** (change path via `--output`):
+
+- **Baseline regression** — primary-completion HGBR (TransformedTargetRegressor), `scoring="r2"` on the train fold.
+- **Late-risk classifier** — same setup as `late_risk_classifier.py`, `scoring="roc_auc"` on the train fold.
+
+Both runs use `sklearn.inspection.permutation_importance` (recent HGBR/HGBC no longer expose an impurity-based `feature_importances_`), 4 repeats, up to 12k rows sampled, and one-hot columns are reported individually (e.g. `category_NEO`).
+
 ## Metrics
 
 Regression: **RMSE**, **MAE**, **R²** on train / val / test as printed in each report. Classification: see late-risk report. For a single-command refresh of the default primary baseline report, run `python 4_regression/core/step03_train_regression.py` and open **`6_results/regression_report.txt`**.
@@ -99,3 +108,15 @@ Primary-completion test metrics (baseline feature policy) — latest run (`final
 | PHASE2/PHASE3 (late joint routing) | 216 | 0.2465 | 576 | 380 |
 
 Late-risk classifier (strict planning features, test split, **probability threshold 0.6**): precision **0.5444**, recall **0.4759**, F1 **0.5079**, ROC-AUC **0.7771**, PR-AUC **0.5741**.
+
+### Top permutation-importance features (latest run)
+
+Normalized to sum to 1 per model (full list in `6_results/feature_importance_rankings.txt`).
+
+| Rank | Baseline regression (R²) | Late-risk classifier (ROC-AUC) |
+|:---:|---|---|
+| 1 | `max_planned_followup_days` (0.160) | `max_planned_followup_days` (0.208) |
+| 2 | `start_year` (0.058) | `category_NEO` (0.116) |
+| 3 | `category_NEO` (0.045) | `enrollment` (0.082) |
+| 4 | `maximum_age` (0.043) | `maximum_age` (0.055) |
+| 5 | `enrollment` (0.034) | `eligibility_n_inclusion_tildes` (0.031) |
