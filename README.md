@@ -154,6 +154,7 @@ of `planning_experiment_runner.py`.
 **Classification (late-risk)**: `HistGradientBoostingClassifier`
 
 - `max_iter=200`, `random_state=42`, `class_weight="balanced"`
+- **Decision threshold:** `late_risk_pred = 1` when predicted positive-class probability **≥ 0.6** (override with `--decision-threshold` on `late_risk_classifier.py`).
 - Label: `late_risk = 1` if actual total days > Q75 within the trial's
   **(phase, disease category)** cell, where disease category is the CCSR
   domain (`ccsr_domain`, 21 body-system groups; unmapped trials use
@@ -196,13 +197,13 @@ Two feature policies control which inputs are available at prediction time:
 | Group | Features |
 |---|---|
 | Trial | `phase`, `enrollment`, `n_sponsors`, `number_of_arms`, `start_year`\*, `category` |
-| Condition | Top-50 MeSH terms (one-hot), remainder as "other" |
-| Intervention | `intervention_type` (top 15), `number_of_interventions`, `intervention_type_diversity`, `mono_therapy`, `has_placebo`, `has_active_comparator`, `n_mesh_intervention_terms` |
+| Condition | `category` (CCSR domain from condition mapping); MeSH term one-hot **not** used in the current matrix |
+| Intervention | `intervention_type` (top 15), `number_of_interventions`, `intervention_type_diversity`, `has_placebo`, `has_active_comparator`, `n_mesh_intervention_terms` |
 | Eligibility (structured) | `gender`, `minimum_age`, `maximum_age`, `adult`, `child`, `older_adult` |
 | Eligibility (text) | Criteria text length, inclusion count, exclusion count, burden procedure flag (biopsy / MRI / endoscopy / PET scan) |
 | Site footprint\* | `number_of_facilities`, `number_of_countries`, `us_only`, `has_single_facility`, `number_of_us_states`, `facility_density` |
-| Study design | `randomized`, `intervention_model` (top 6), `masking_depth_score`, `primary_purpose` (top 6), `design_complexity_composite` |
-| Outcomes | `max_planned_followup_days`, `n_primary_outcomes`, `n_secondary_outcomes`, `n_outcomes`, `has_survival_endpoint`, `has_safety_endpoint`, `endpoint_complexity_score` |
+| Study design | `randomized`, `intervention_model` (top 6), `masking_depth_score`, `primary_purpose` (top 6) |
+| Outcomes | `max_planned_followup_days`, `n_primary_outcomes`, `n_secondary_outcomes`, `n_outcomes`, `has_survival_endpoint`, `has_safety_endpoint` |
 
 \* Excluded from `strict_planning` policy
 
@@ -220,23 +221,26 @@ Two feature policies control which inputs are available at prediction time:
 
 ### Reported Performance (Test Set)
 
+Dedicated primary-completion models (baseline features), latest run — see **`final_results_capstone.txt`** for full tables.
+
 | Phase | R² |
 |---|---|
-| Phase 1 | 0.6014 |
-| Phase 2 | 0.4234 |
-| Phase 3 | 0.4075 |
+| Phase 1 | 0.5981 |
+| Phase 2 | 0.4206 |
+| Phase 3 | 0.4189 |
 
 ### Latest Verified Run Snapshot
 
 The following values are from the latest end-to-end execution in this repository
-(`3_preprocessing/preprocess.py` + `4_regression/core/step03_train_regression.py`):
+(condition mapping + `3_preprocessing/preprocess.py` + `4_regression/core/step03_train_regression.py` + `late_risk_classifier.py`), summarized in **`final_results_capstone.txt`** (2026-04-20):
 
 - Preprocessed trials after all filters: **84,879**
 - Modeling cohort (COMPLETED): **57,865**
 - Condition mapping join coverage in modeling cohort (`has_ccsr=1`): **73.9%**
 - Mixed-phase routing results:
-  - `PHASE1/PHASE2` (early joint): **R²=0.3536**, RMSE=608 days, MAE=422 days
-  - `PHASE2/PHASE3` (late joint): **R²=0.2252**, RMSE=585 days, MAE=387 days
+  - `PHASE1/PHASE2` (early joint): **R²=0.3571**, RMSE=606 days, MAE=419 days
+  - `PHASE2/PHASE3` (late joint): **R²=0.2465**, RMSE=576 days, MAE=380 days
+- Late-risk classifier (test split, probability threshold 0.6): **precision=0.5444**, **recall=0.4759**, **F1=0.5079**, **ROC-AUC=0.7771**, **PR-AUC=0.5741**
 
 ### Deviation Metrics
 
@@ -280,18 +284,18 @@ architecture combining:
 - MeSH embedding layers
 - DANet blocks for tabular features
 
-**Performance comparison** (R², test set):
+**Performance comparison** (R², test set — dedicated primary-completion models):
 
 | Phase | TrialBench (Chen et al., 2025) | This project |
 |---|---|---|
-| Phase 1 | 0.6514 ± 0.0085 | ~0.60 |
-| Phase 2 | 0.4125 ± 0.0081 | ~0.42–0.43 |
-| Phase 3 | 0.3148 ± 0.0085 | ~0.42–0.43 |
+| Phase 1 | 0.6514 ± 0.0085 | 0.5981 |
+| Phase 2 | 0.4125 ± 0.0081 | 0.4206 |
+| Phase 3 | 0.3148 ± 0.0085 | 0.4189 |
 
 Despite using only tabular features and a single gradient boosting algorithm
 (no molecular graphs, no pre-trained language models, no disease hierarchies),
 this project matches or exceeds TrialBench on Phase 2 and substantially
-surpasses it on Phase 3. The Phase 3 gap (~+0.11 R²) is the most significant
+surpasses it on Phase 3. The Phase 3 gap (on the order of **+0.10 R²** in the latest run) is the most significant
 finding: a simpler, more interpretable model trained on structured planning-time
 features outperforms a multi-modal deep learning baseline for the most complex
 and longest trials.
@@ -412,6 +416,7 @@ python tests/validate_targets.py
 
 | Path | Contents |
 |---|---|
+| `final_results_capstone.txt` | Latest end-to-end regression + late-risk metrics (capstone summary) |
 | `0_data/clean_data/studies.csv` | Preprocessed trial records |
 | `0_data/clean_data/preprocessing_summary.txt` | Filtering summary |
 | `0_data/clean_data/enrollment_stats_by_phase.csv` | Enrollment statistics by phase |

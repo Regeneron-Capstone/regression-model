@@ -43,6 +43,7 @@ from cohort_columns import (  # noqa: E402
     KEPT_ELIGIBILITY_CRITERIA_TEXT,
     KEPT_SITE_FOOTPRINT,
     LATE_JOINT_PHASES,
+    default_feature_prep_kw,
 )
 from step00_cohort_io import load_and_join  # noqa: E402
 from step03_train_regression import RESULTS_DIR, _new_regressor, prepare_features  # noqa: E402
@@ -83,15 +84,8 @@ STAGE_CONFIGS: tuple[dict[str, Any], ...] = (
 
 
 def _base_prep_kw() -> dict[str, Any]:
-    return dict(
-        eligibility_columns=KEPT_ELIGIBILITY,
-        eligibility_criteria_text_columns=KEPT_ELIGIBILITY_CRITERIA_TEXT,
-        site_footprint_columns=KEPT_SITE_FOOTPRINT,
-        design_columns=KEPT_DESIGN,
-        arm_intervention_columns=KEPT_ARM_INTERVENTION,
-        design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
-        encode_phase=False,
-    )
+    d = default_feature_prep_kw(policy="baseline", target_kind="primary_completion")
+    return {k: v for k, v in d.items() if k not in ("policy", "target_kind")}
 
 
 def _prep_kw_for_transform() -> dict[str, Any]:

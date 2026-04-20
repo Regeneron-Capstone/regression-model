@@ -144,6 +144,7 @@ def run_experiment(
     late_quantile: float,
     disease_axis: str = "ccsr_domain",
     min_group_rows: int = 30,
+    decision_threshold: float = 0.6,
 ) -> Path | None:
     run_id = _utc_run_id()
     exp_dir = EXPERIMENTS_DIR / run_id
@@ -212,6 +213,8 @@ def run_experiment(
                 disease_axis,
                 "--min-group-rows",
                 str(min_group_rows),
+                "--decision-threshold",
+                str(decision_threshold),
             ],
         ),
         (
@@ -285,16 +288,25 @@ def main() -> None:
         default=30,
         help="Minimum train rows in a (phase, domain) cell before using its own Q (default: 30).",
     )
+    p.add_argument(
+        "--decision-threshold",
+        type=float,
+        default=0.6,
+        help="Late-risk classifier probability threshold (passed to late_risk_classifier, default: 0.6).",
+    )
     args = p.parse_args()
     if not (0.0 < args.late_quantile < 1.0):
         sys.exit("--late-quantile must be in (0, 1)")
     if args.min_group_rows < 1:
         sys.exit("--min-group-rows must be >= 1")
+    if not (0.0 < args.decision_threshold < 1.0):
+        sys.exit("--decision-threshold must be in (0, 1)")
     run_experiment(
         dry_run=args.dry_run,
         late_quantile=args.late_quantile,
         disease_axis=args.disease_axis,
         min_group_rows=args.min_group_rows,
+        decision_threshold=args.decision_threshold,
     )
 
 

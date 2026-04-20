@@ -56,6 +56,7 @@ from cohort_columns import (  # noqa: E402
     KEPT_ELIGIBILITY,
     KEPT_ELIGIBILITY_CRITERIA_TEXT,
     KEPT_SITE_FOOTPRINT,
+    default_feature_prep_kw,
 )
 from step00_cohort_io import load_and_join  # noqa: E402
 from step03_train_regression import RESULTS_DIR, prepare_features  # noqa: E402
@@ -107,17 +108,7 @@ class ThresholdMap:
 
 
 def _prep_kw_strict() -> dict:
-    return dict(
-        eligibility_columns=KEPT_ELIGIBILITY,
-        eligibility_criteria_text_columns=KEPT_ELIGIBILITY_CRITERIA_TEXT,
-        site_footprint_columns=KEPT_SITE_FOOTPRINT,
-        design_columns=KEPT_DESIGN,
-        arm_intervention_columns=KEPT_ARM_INTERVENTION,
-        design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
-        encode_phase=False,
-        policy="strict_planning",
-        target_kind="total_completion",
-    )
+    return default_feature_prep_kw(policy="strict_planning", target_kind="total_completion")
 
 
 def _fit_threshold_map(
@@ -343,6 +334,7 @@ def run(
     predictions_path: Path,
     disease_axis: DiseaseAxis = "ccsr_domain",
     min_group_rows: int = 30,
+    decision_threshold: float = 0.6,
 ) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,9 +414,9 @@ def run(
     proba_train = _proba_pos(X[i_train])
     proba_val = _proba_pos(X[i_val])
     proba_test = _proba_pos(X[i_test])
-    pred_train = (proba_train >= 0.5).astype(int)
-    pred_val = (proba_val >= 0.5).astype(int)
-    pred_test = (proba_test >= 0.5).astype(int)
+    pred_train = (proba_train >= decision_threshold).astype(int)
+    pred_val = (proba_val >= decision_threshold).astype(int)
+    pred_test = (proba_test >= decision_threshold).astype(int)
 
     axis_desc = (
         "phase only (legacy)"
@@ -437,6 +429,7 @@ def run(
     lines.append("=" * 72)
     lines.append("Model: HistGradientBoostingClassifier (max_iter=200, class_weight=balanced)")
     lines.append(f"random_state: {random_state}")
+    lines.append(f"Positive-class decision threshold (predicted probability): {decision_threshold:g}")
     lines.append("Feature policy: strict_planning (no regression trainer coupling)")
     lines.append("Regression target used only to define rows/continuity: total_completion (days)")
     lines.append("")
@@ -482,7 +475,7 @@ def run(
     split_names[i_test] = "test"
 
     proba_all = _proba_pos(X)
-    pred_all = (proba_all >= 0.5).astype(int)
+    pred_all = (proba_all >= decision_threshold).astype(int)
     y_all, thr_all, src_all = _apply_threshold_map(y_cont, phases, domains, tmap)
 
     out = pd.DataFrame(
@@ -532,6 +525,12 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--random-state", type=int, default=42, help="Split + HGBC seed (default: 42).")
     p.add_argument(
+        "--decision-threshold",
+        type=float,
+        default=0.6,
+        help="Probability threshold for late_risk_pred=1 (default: 0.6).",
+    )
+    p.add_argument(
         "--report",
         type=Path,
         default=RESULTS_DIR / "late_risk_classification_report.txt",
@@ -557,6 +556,8 @@ def main() -> None:
         raise SystemExit("--late-quantile must be in (0, 1)")
     if args.min_group_rows < 1:
         raise SystemExit("--min-group-rows must be >= 1")
+    if not (0.0 < args.decision_threshold < 1.0):
+        raise SystemExit("--decision-threshold must be in (0, 1)")
     run(
         late_quantile=args.late_quantile,
         random_state=args.random_state,
@@ -564,6 +565,7 @@ def main() -> None:
         predictions_path=args.predictions.expanduser().resolve(),
         disease_axis=args.disease_axis,
         min_group_rows=args.min_group_rows,
+        decision_threshold=args.decision_threshold,
     )
 
 

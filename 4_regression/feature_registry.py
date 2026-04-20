@@ -26,7 +26,6 @@ PLANNING_SAFE_CORE: FrozenSet[str] = frozenset(
         "n_sponsors",  # sponsor list is part of the registered record before conduct
         "number_of_arms",
         "category",
-        "downcase_mesh_term",
         "intervention_type",
     }
 )
@@ -59,7 +58,6 @@ PLANNING_SAFE_DESIGN: FrozenSet[str] = frozenset(
         "intervention_model",
         "masking_depth_score",
         "primary_purpose",
-        "design_complexity_composite",
     }
 )
 
@@ -68,7 +66,6 @@ PLANNING_SAFE_ARMS_INTERVENTIONS: FrozenSet[str] = frozenset(
     {
         "number_of_interventions",
         "intervention_type_diversity",
-        "mono_therapy",
         "has_placebo",
         "has_active_comparator",
         "n_mesh_intervention_terms",
@@ -86,7 +83,6 @@ PLANNING_SAFE_DESIGN_OUTCOMES: FrozenSet[str] = frozenset(
         "n_outcomes",
         "has_survival_endpoint",
         "has_safety_endpoint",
-        "endpoint_complexity_score",
     }
 )
 

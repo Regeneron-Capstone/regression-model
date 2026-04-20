@@ -20,12 +20,10 @@ KEPT_DESIGN = [
     "intervention_model",
     "masking_depth_score",
     "primary_purpose",
-    "design_complexity_composite",
 ]
 KEPT_ARM_INTERVENTION = [
     "number_of_interventions",
     "intervention_type_diversity",
-    "mono_therapy",
     "has_placebo",
     "has_active_comparator",
     "n_mesh_intervention_terms",
@@ -37,7 +35,6 @@ KEPT_DESIGN_OUTCOMES = [
     "n_outcomes",
     "has_survival_endpoint",
     "has_safety_endpoint",
-    "endpoint_complexity_score",
 ]
 
 PHASE_SINGLE_MODELS: tuple[str, ...] = ("PHASE1", "PHASE2", "PHASE3")
@@ -66,6 +63,7 @@ def default_feature_prep_kw(*, policy: str, target_kind: str) -> dict:
         arm_intervention_columns=KEPT_ARM_INTERVENTION,
         design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
         encode_phase=False,
+        include_mesh_term=False,
         policy=policy,
         target_kind=target_kind,
     )

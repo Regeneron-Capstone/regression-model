@@ -34,6 +34,7 @@ from cohort_columns import (
     PHASE_REPORT_ORDER,
     PHASE_SINGLE_MODELS,
     PHASES_WITH_DEDICATED_MODELS,
+    default_feature_prep_kw,
 )
 from step00_cohort_io import load_and_join
 from step01_features import assemble_feature_matrix
@@ -55,7 +56,6 @@ logger = logging.getLogger(__name__)
 # Features: target_duration (97% null) and number_of_groups (100% null) excluded
 # category (132 unique) outperforms therapeutic_area (16 unique): R² 0.317 vs 0.285
 # Phase: one-hot (R² 0.317) > phase flags (0.315) > no phase (0.280)
-# downcase_mesh_term: ablation R² 0.319 vs 0.317 baseline — small gain, included
 # intervention_type: ablation R² 0.320 vs 0.319 baseline — included
 # eligibility: gender, minimum_age, maximum_age, adult, child, older_adult (ablation-tested)
 FEATURE_COLUMNS = [
@@ -65,7 +65,6 @@ FEATURE_COLUMNS = [
     "number_of_arms",
     "start_year",
     "category",
-    "downcase_mesh_term",
     "intervention_type",
 ]
 ELIGIBILITY_COLUMNS = ["gender", "minimum_age", "maximum_age", "adult", "child", "older_adult"]
@@ -82,12 +81,10 @@ DESIGN_FEATURES = [
     "intervention_model",
     "masking_depth_score",
     "primary_purpose",
-    "design_complexity_composite",
 ]
 ARM_INTERVENTION_FEATURES = [
     "number_of_interventions",
     "intervention_type_diversity",
-    "mono_therapy",
     "has_placebo",
     "has_active_comparator",
     "n_mesh_intervention_terms",
@@ -126,6 +123,7 @@ def prepare_features(
     design_outcomes_columns: list[str] | None = None,
     *,
     encode_phase: bool = False,
+    include_mesh_term: bool = False,
     policy: str = "baseline",
     target_kind: str = DEFAULT_TARGET_KIND,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -143,6 +141,7 @@ def prepare_features(
         arm_intervention_columns=arm_intervention_columns,
         design_outcomes_columns=design_outcomes_columns,
         encode_phase=encode_phase,
+        include_mesh_term=include_mesh_term,
         policy=policy,  # type: ignore[arg-type]
         target_kind=target_kind,
     )
@@ -291,17 +290,7 @@ def run_training(
         lines.append(f"  {ph}: n={n:,}")
     lines.append("")
 
-    prep_kw = dict(
-        eligibility_columns=KEPT_ELIGIBILITY,
-        eligibility_criteria_text_columns=KEPT_ELIGIBILITY_CRITERIA_TEXT,
-        site_footprint_columns=KEPT_SITE_FOOTPRINT,
-        design_columns=KEPT_DESIGN,
-        arm_intervention_columns=KEPT_ARM_INTERVENTION,
-        design_outcomes_columns=KEPT_DESIGN_OUTCOMES,
-        encode_phase=False,
-        target_kind=target_kind,
-        policy=feature_policy,
-    )
+    prep_kw = default_feature_prep_kw(policy=feature_policy, target_kind=target_kind)
 
     # phase_label -> (test_n, test_r2, model_description)
     summary: dict[str, tuple[int, float, str]] = {}

@@ -347,17 +347,19 @@ def _collect_logical_inputs_for_validation(
     arm_intervention_columns: list[str] | None,
     design_outcomes_columns: list[str] | None,
     include_start_year: bool,
+    include_mesh_term: bool,
 ) -> list[str]:
     """Logical study-level columns feeding the matrix (excluding one-hot expanded names)."""
     out: list[str] = [
         "phase",
         "category",
-        "downcase_mesh_term",
         "intervention_type",
         "enrollment",
         "n_sponsors",
         "number_of_arms",
     ]
+    if include_mesh_term:
+        out.insert(2, "downcase_mesh_term")
     if include_start_year:
         out.append("start_year")
     for group in (
@@ -383,6 +385,7 @@ def assemble_feature_matrix(
     design_outcomes_columns: list[str] | None = None,
     *,
     encode_phase: bool = False,
+    include_mesh_term: bool = False,
     policy: PolicyName = "baseline",
     target_kind: str = DEFAULT_TARGET_KIND,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -425,6 +428,7 @@ def assemble_feature_matrix(
             arm_intervention_columns=arm_cols,
             design_outcomes_columns=do_cols,
             include_start_year=include_start_year,
+            include_mesh_term=include_mesh_term,
         )
         validate_no_leakage(logical, get_feature_policy("strict_planning").forbidden)
 
@@ -432,7 +436,10 @@ def assemble_feature_matrix(
 
     phase_blocks, phase_encoder = build_phase_block(df, encode_phase=encode_phase)
     cat_encoded, cat_encoder = build_category_block(df)
-    mesh_parts, mesh_encoder, mesh_top_terms = build_mesh_block(df)
+    if include_mesh_term:
+        mesh_parts, mesh_encoder, mesh_top_terms = build_mesh_block(df)
+    else:
+        mesh_parts, mesh_encoder, mesh_top_terms = [], None, []
     int_parts, int_encoder, int_top_terms = build_intervention_type_block(df)
     elig_parts, elig_encoders, elig_feature_names = build_eligibility_blocks(df, elig_cols)
     criteria_parts, criteria_text_feature_names = build_criteria_text_blocks(df, crit_cols)
@@ -468,6 +475,7 @@ def assemble_feature_matrix(
                 arm_intervention_columns=arm_cols,
                 design_outcomes_columns=do_cols,
                 include_start_year=include_start_year,
+                include_mesh_term=include_mesh_term,
             )
         )
     )
@@ -475,6 +483,7 @@ def assemble_feature_matrix(
     artifacts = {
         "phase_encoder": phase_encoder,
         "cat_encoder": cat_encoder,
+        "include_mesh_term": include_mesh_term,
         "mesh_encoder": mesh_encoder,
         "int_encoder": int_encoder,
         "mesh_top_terms": mesh_top_terms,
@@ -499,6 +508,34 @@ def assemble_feature_matrix(
     if "nct_id" in df.columns:
         artifacts["nct_ids"] = df["nct_id"].astype(str).to_numpy()
     return X, y, phases, artifacts
+
+
+def feature_matrix_column_names(artifacts: dict) -> list[str]:
+    """
+    Names for columns of ``X`` from ``assemble_feature_matrix``, in hstack order
+    (must match ``transform_feature_matrix``).
+    """
+    names: list[str] = []
+    phase_encoder = artifacts.get("phase_encoder")
+    if bool(artifacts.get("encode_phase")) and phase_encoder is not None:
+        names.extend(list(phase_encoder.get_feature_names_out(["phase"])))
+    cat_encoder = artifacts.get("cat_encoder")
+    if cat_encoder is not None:
+        names.extend(list(cat_encoder.get_feature_names_out(["category"])))
+    if artifacts.get("include_mesh_term") and artifacts.get("mesh_encoder") is not None:
+        mesh_enc = artifacts["mesh_encoder"]
+        names.extend(list(mesh_enc.get_feature_names_out(["mesh_trimmed"])))
+    int_encoder = artifacts.get("int_encoder")
+    if int_encoder is not None:
+        names.extend(list(int_encoder.get_feature_names_out(["intervention_trimmed"])))
+    names.extend(list(artifacts.get("elig_feature_names") or []))
+    names.extend(list(artifacts.get("criteria_text_feature_names") or []))
+    names.extend(list(artifacts.get("site_feature_names") or []))
+    names.extend(list(artifacts.get("design_feature_names") or []))
+    names.extend(list(artifacts.get("do_feature_names") or []))
+    names.extend(list(artifacts.get("arm_feature_names") or []))
+    names.extend(list(artifacts.get("numeric_feature_names") or []))
+    return names
 
 
 def _transform_eligibility_blocks(
@@ -589,6 +626,7 @@ def transform_feature_matrix(
     design_outcomes_columns: list[str] | None = None,
     *,
     encode_phase: bool | None = None,
+    include_mesh_term: bool | None = None,
     policy: PolicyName | None = None,
 ) -> np.ndarray:
     """
@@ -598,6 +636,12 @@ def transform_feature_matrix(
     """
     pol: PolicyName = policy if policy is not None else artifacts["feature_policy"]
     enc_phase = encode_phase if encode_phase is not None else bool(artifacts.get("encode_phase", False))
+    if include_mesh_term is not None:
+        mesh_on = include_mesh_term
+    elif "include_mesh_term" in artifacts:
+        mesh_on = bool(artifacts["include_mesh_term"])
+    else:
+        mesh_on = artifacts.get("mesh_encoder") is not None
 
     df = add_start_year_column(df.copy())
     df = coerce_core_numerics(df)
@@ -619,6 +663,7 @@ def transform_feature_matrix(
             arm_intervention_columns=arm_cols,
             design_outcomes_columns=do_cols,
             include_start_year=include_start_year,
+            include_mesh_term=mesh_on,
         )
         validate_no_leakage(logical, get_feature_policy("strict_planning").forbidden)
 
@@ -633,9 +678,9 @@ def transform_feature_matrix(
         df["category"] = "Other_Unclassified"
     cat_encoded = cat_encoder.transform(df[["category"]].astype(str))
 
-    mesh_encoder = artifacts.get("mesh_encoder")
+    mesh_encoder = artifacts.get("mesh_encoder") if mesh_on else None
     mesh_top_terms: list[str] = list(artifacts.get("mesh_top_terms") or [])
-    if mesh_encoder is not None and mesh_top_terms:
+    if mesh_on and mesh_encoder is not None and mesh_top_terms:
         if "downcase_mesh_term" not in df.columns:
             df = df.copy()
             df["downcase_mesh_term"] = "unknown"

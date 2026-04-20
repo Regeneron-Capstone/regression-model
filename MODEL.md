@@ -60,7 +60,7 @@ Outputs:
 - `6_results/late_risk_classification_report.txt` — metrics plus the per-group threshold table.
 - `6_results/late_risk_predictions.csv` — per-trial columns include `disease_category`, `late_threshold_days`, `late_threshold_source`, `late_risk_true`, `late_risk_pred_proba`, `late_risk_pred`.
 
-Reported metrics (train / val / test): precision, recall, F1, ROC-AUC, PR-AUC, positive rate.
+Reported metrics (train / val / test): precision, recall, F1, ROC-AUC, PR-AUC, positive rate. **Default decision rule:** `late_risk_pred = 1` when predicted positive-class probability **≥ 0.6** (CLI: `--decision-threshold`).
 
 ## Deviation and comparison
 
@@ -75,8 +75,12 @@ Regression: **RMSE**, **MAE**, **R²** on train / val / test as printed in each 
 
 From the latest local run of:
 
+- `python 3_preprocessing/run_condition_mapping.py`
 - `python 3_preprocessing/preprocess.py`
 - `python 4_regression/core/step03_train_regression.py`
+- `PYTHONPATH=4_regression python 4_regression/experiments/late_risk_classifier.py`
+
+(Condensed copy: **`final_results_capstone.txt`** at repo root.)
 
 Snapshot:
 
@@ -84,12 +88,14 @@ Snapshot:
 - Completed modeling cohort: **57,865**
 - Condition-mapping coverage in completed cohort (`has_ccsr=1`): **73.9%**
 
-Primary-completion test metrics (baseline feature policy):
+Primary-completion test metrics (baseline feature policy) — latest run (`final_results_capstone.txt`, 2026-04-20):
 
 | Phase / route | Test n | R² | RMSE (days) | MAE (days) |
 |---|---:|---:|---:|---:|
-| PHASE1 (dedicated) | 4,293 | 0.6014 | 330 | 183 |
-| PHASE2 (dedicated) | 3,305 | 0.4234 | 479 | 322 |
-| PHASE3 (dedicated) | 3,093 | 0.4075 | 457 | 304 |
-| PHASE1/PHASE2 (early joint routing) | 640 | 0.3536 | 608 | 422 |
-| PHASE2/PHASE3 (late joint routing) | 216 | 0.2252 | 585 | 387 |
+| PHASE1 (dedicated) | 4,293 | 0.5981 | 331 | 183 |
+| PHASE2 (dedicated) | 3,305 | 0.4206 | 481 | 323 |
+| PHASE3 (dedicated) | 3,093 | 0.4189 | 453 | 301 |
+| PHASE1/PHASE2 (early joint routing) | 640 | 0.3571 | 606 | 419 |
+| PHASE2/PHASE3 (late joint routing) | 216 | 0.2465 | 576 | 380 |
+
+Late-risk classifier (strict planning features, test split, **probability threshold 0.6**): precision **0.5444**, recall **0.4759**, F1 **0.5079**, ROC-AUC **0.7771**, PR-AUC **0.5741**.
