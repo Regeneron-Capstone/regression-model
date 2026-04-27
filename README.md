@@ -4,6 +4,12 @@ A machine learning pipeline for predicting clinical trial completion timelines
 using regression models trained on completed, industry-sponsored trials from
 ClinicalTrials.gov.
 
+**Group 66 Regeneron Group:** Aashna Ram, Alison Guo, Angel Huang, Pablo San Francisco, Xianyang Duan
+
+**Industry mentor:** Henry Wei, Regeneron Pharmaceuticals
+
+**Spring 2026**
+
 ---
 
 ## Overview
