@@ -65,6 +65,7 @@ Reported metrics (train / val / test): precision, recall, F1, ROC-AUC, PR-AUC, p
 ## Deviation and comparison
 
 - **Deviation:** `5_deviation/deviation_analysis.py` — percent deviation of actual vs predicted for configurable targets; **`--target combined`** consumes the combined forecast CSV.
+- - **Risk flagging & accuracy bands:** `5_deviation/baseline_deviation.py` extends the deviation analysis with a ±20% threshold to flag late-risk trials (`late_risk_flag`), and reports accuracy bands (% of trials predicted within ±10%, ±20%, ±30%) for diagnostic interpretation.
 - **Baseline vs staged summary:** `4_regression/build_final_comparison_report.py` aggregates regression reports, optional **`baseline_metadata.json`**, optional **frozen** primary regression report, and the late-risk report into **`final_comparison_metrics.csv`** and a Markdown (optional TXT) narrative.
 
 ## Feature importance (`4_regression/experiments/feature_importance_ranking.py`)
